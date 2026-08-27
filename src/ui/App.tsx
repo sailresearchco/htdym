@@ -418,6 +418,7 @@ export function App() {
           onSweep={setSweep}
           chips={chips}
           onChips={setChips}
+          basis={costBasis}
         />
         <main className="main">
           <div className="toolbar">

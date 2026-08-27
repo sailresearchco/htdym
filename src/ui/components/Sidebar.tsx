@@ -6,7 +6,7 @@ import { MODEL_PRESETS, ModelSpec } from '../../core/model/models';
 import { DTYPE_BYTES } from '../../core/model/dtype';
 import { fmtBytes } from '../format';
 import { machineAtNodes, machineLabel, machineOf, maxNodesOf, slicesOf } from '../machines';
-import { H100_ID, relPriceOf, relPriceToDollars } from '../pricing';
+import { CostBasis, H100_ID, relPriceOf, relPriceToDollars } from '../pricing';
 import { UiChip, UiWorkload } from '../results';
 import { VendorLogo } from './VendorLogo';
 
@@ -31,10 +31,12 @@ interface Props {
   /** the app's editable copy of the chip database */
   chips: UiChip[];
   onChips: (chips: UiChip[]) => void;
+  /** active cost basis: the chip list's cost column shows price or TDP */
+  basis: CostBasis;
 }
 
 export function Sidebar(p: Props) {
-  const { model, workload, sweep, chips } = p;
+  const { model, workload, sweep, chips, basis } = p;
   const vendors = [...new Set(chips.map((c) => c.vendor))];
   const patchChip = (id: string, patch: Partial<UiChip>) =>
     p.onChips(chips.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -198,10 +200,14 @@ export function Sidebar(p: Props) {
               {vendor}
               {vi === 0 && (
                 <span className="price-col-label">
-                  Price vs H100
+                  {basis === 'power' ? 'TDP' : 'Price vs H100'}
                   <span
                     className="info-i info-i--end"
-                    data-tip="Hourly rental price per chip, as a multiple of one H100 (H100 = 1)."
+                    data-tip={
+                      basis === 'power'
+                        ? "Thermal design power per chip. The per-kW efficiency columns divide by it, relative to the H100's 700 W."
+                        : 'Hourly rental price per chip, as a multiple of one H100 (H100 = 1).'
+                    }
                     aria-label="explanation"
                   >
                     ⓘ
@@ -233,30 +239,47 @@ export function Sidebar(p: Props) {
                       />
                       <span>{c.name}</span>
                     </label>
-                    <span
-                      className="cost-input"
-                      title={
-                        c.id === H100_ID
-                          ? 'The reference chip: every price is quoted relative to one H100 chip-hour'
-                          : `Rental price per ${c.name} chip-hour, relative to one H100 chip-hour`
-                      }
-                    >
-                      <input
-                        type="number"
-                        step={0.05}
-                        min={0}
-                        disabled={c.id === H100_ID}
-                        value={relDisplay(c)}
-                        onChange={(e) =>
-                          patchChip(c.id, {
-                            costPerHour: Number.isFinite(e.target.valueAsNumber)
-                              ? relPriceToDollars(e.target.valueAsNumber)
-                              : undefined,
-                          })
+                    {basis === 'power' ? (
+                      <span
+                        className="cost-input"
+                        title={
+                          c.tdp !== undefined
+                            ? `${c.name} thermal design power`
+                            : `${c.vendor} publishes no TDP for the ${c.name}, so it shows no per-kW efficiency`
                         }
-                      />
-                      × H100
-                    </span>
+                      >
+                        {c.tdp !== undefined ? (
+                          <span className="mono">{c.tdp} W</span>
+                        ) : (
+                          <span className="muted">unknown</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span
+                        className="cost-input"
+                        title={
+                          c.id === H100_ID
+                            ? 'The reference chip: every price is quoted relative to one H100 chip-hour'
+                            : `Rental price per ${c.name} chip-hour, relative to one H100 chip-hour`
+                        }
+                      >
+                        <input
+                          type="number"
+                          step={0.05}
+                          min={0}
+                          disabled={c.id === H100_ID}
+                          value={relDisplay(c)}
+                          onChange={(e) =>
+                            patchChip(c.id, {
+                              costPerHour: Number.isFinite(e.target.valueAsNumber)
+                                ? relPriceToDollars(e.target.valueAsNumber)
+                                : undefined,
+                            })
+                          }
+                        />
+                        × H100
+                      </span>
+                    )}
                     <button
                       className={`gear ${openSettings.has(c.id) ? 'on' : ''}`}
                       aria-label={`${c.name} settings`}
