@@ -17,7 +17,7 @@ export interface SlicedFabric extends FabricBase {
   // The discrete list of acquirable slice/instance topologies: the single
   // source of truth for what can be rented.
   topologies: SliceTopology[];
-  // Chips housed by one host machine (a v5e host holds a 4x2 block);
+  // Chips housed by one host machine (a v6e host holds a 2x4 block);
   // translates a global node count into a slice size.
   chipsPerHost: number;
   scaleOut?: never;

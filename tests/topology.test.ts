@@ -3,7 +3,7 @@ import { deployedAxes, factorAxes } from '../src/core/hardware/topology';
 import { CHIPS_BY_ID } from '../src/core/hardware/chips';
 
 const v5p = CHIPS_BY_ID['tpu-v5p'].interconnect;
-const v5e = CHIPS_BY_ID['tpu-v5e'].interconnect;
+const v6e = CHIPS_BY_ID['tpu-v6e'].interconnect;
 const h100 = CHIPS_BY_ID['h100-sxm'].interconnect;
 
 test('torus slice resolves to per-axis rings', () => {
@@ -16,10 +16,10 @@ test('torus slice resolves to per-axis rings', () => {
 });
 
 test('cylinder wraps only the long axis', () => {
-  const slice = v5e.topologies!.find((t) => t.name === '8x16')!;
-  const axes = deployedAxes(v5e, slice);
+  const slice = v6e.topologies!.find((t) => t.name === '8x16')!;
+  const axes = deployedAxes(v6e, slice);
   expect(axes.map((a) => a.wrap)).toEqual([false, true]);
-  expect(axes[0].bandwidth).toBe(45e9);
+  expect(axes[0].bandwidth).toBe(90e9);
 });
 
 test('switched board plus scale-out tier', () => {

@@ -75,7 +75,7 @@ export function runsAs(chip: ChipSpec, want: Dtype): Dtype {
 }
 
 // prettier-ignore
-const V5E_SLICES = slices([
+const V6E_SLICES = slices([
   '1x1:m', '2x2:m', '2x4:m', '4x4:m', '4x8:m', '8x8:m', '8x16:c', '16x16:t',
 ]);
 
@@ -637,30 +637,6 @@ export const CHIPS: ChipSpec[] = [
     tdp: 500, // semianalysis rumor
   },
   {
-    id: 'tpu-v5e',
-    name: 'TPU v5e',
-    vendor: 'Google',
-    formats: { bf16: 197e12, int8: 394e12, int4: 788e12, fp8: 'kernel-widened' },
-    hbmCapacity: 16e9,
-    hbmBandwidth: 8.19e11,
-    // 2D torus, 4 ICI links x 45 GB/s one-way each = 180 GB/s egress, 16x16
-    // slice. No OCS: smaller slices are open meshes, 8x16 a cylinder (wrap
-    // on the 16-axis only), 16x16 the full torus. Note no 2-chip slice.
-    interconnect: {
-      bandwidthPerChip: 180e9,
-      latency: 1e-6,
-      domainSize: 256,
-      topologies: V5E_SLICES,
-      chipsPerHost: 8,
-    },
-    realizableFlopsFrac: 0.9,
-    realizableHbmBwFrac: 0.85,
-    costPerHour: 0.36,
-    // REVIEW: Google publishes no TDP; NextPlatform/Epoch AI estimate
-    // (SemiAnalysis says 300 W)
-    tdp: 225,
-  },
-  {
     id: 'tpu-v5p',
     name: 'TPU v5p',
     vendor: 'Google',
@@ -691,13 +667,14 @@ export const CHIPS: ChipSpec[] = [
     formats: { bf16: 918e12, int8: 1836e12, int4: 3672e12, fp8: 'kernel-widened' },
     hbmCapacity: 32e9,
     hbmBandwidth: 1.64e12,
-    // 2D torus, 4 ICI links x 90 GB/s one-way each = 360 GB/s egress. Slice
-    // topologies mirror v5e (meshes below 8x16 cylinder / 16x16 torus).
+    // 2D torus, 4 ICI links x 90 GB/s one-way each = 360 GB/s egress, 16x16
+    // slice. No OCS: smaller slices are open meshes, 8x16 a cylinder (wrap
+    // on the 16-axis only), 16x16 the full torus. Note no 2-chip slice.
     interconnect: {
       bandwidthPerChip: 360e9,
       latency: 1e-6,
       domainSize: 256,
-      topologies: V5E_SLICES,
+      topologies: V6E_SLICES,
       chipsPerHost: 8,
     },
     realizableFlopsFrac: 0.9,
