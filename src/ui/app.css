@@ -1,0 +1,24 @@
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  font: 12px var(--mono);
+  color: var(--text-secondary);
+}
+
+.progress-ring .ring-bg {
+  fill: none;
+  stroke: var(--border-light);
+  stroke-width: 3;
+}
+
+.progress-ring .ring-fg {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dashoffset 120ms linear;
+}
