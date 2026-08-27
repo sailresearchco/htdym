@@ -364,6 +364,17 @@ export function App() {
       <header className="topbar">
         <SailResearchLogo />
         <div className="topbar-actions">
+          <a
+            className="info-link"
+            href="https://www.sailresearch.com/blog/htdym"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="About this tool"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 1.8a8.2 8.2 0 1 1 0 16.4 8.2 8.2 0 0 1 0-16.4ZM12 7a1.25 1.25 0 1 1 0 2.5A1.25 1.25 0 0 1 12 7Zm0 4a1 1 0 0 1 1 1v4a1 1 0 1 1-2 0v-4a1 1 0 0 1 1-1Z" />
+            </svg>
+          </a>
           <button
             className="theme-toggle"
             type="button"

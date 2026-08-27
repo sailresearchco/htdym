@@ -172,6 +172,20 @@ a:hover {
   gap: 12px;
   margin-left: 16px;
 }
+.info-link {
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+}
+.info-link:hover {
+  color: var(--blue);
+  text-decoration: none;
+}
+.info-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: 50%;
+}
 .theme-toggle {
   border: none;
   background: none;
