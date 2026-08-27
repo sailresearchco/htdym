@@ -3,6 +3,7 @@
  * chart (axes). `value` returns the sortable/plottable scalar: the predicted
  * value at the Memory/Comms overlap you set.
  */
+import { CostBasis } from './pricing';
 import { UiResult } from './results';
 import { fmtBytes, fmtInt, fmtMult, fmtPct, fmtSI, fmtTime } from './format';
 
@@ -25,7 +26,10 @@ export interface MetricDef {
 
 const na = '—';
 
-export const METRICS: MetricDef[] = [
+// Base registry, written for the price basis; POWER_RELABELS swaps the cost
+// metrics' wording for the per-kW view (their values are basis-agnostic:
+// the app fills eff/requestEff from whichever denominator is active).
+const METRICS: MetricDef[] = [
   {
     key: 'prefillTokPerChip',
     group: 'prefill',
@@ -249,7 +253,31 @@ export function machineRps(r: UiResult): number | null {
   return secsPerReq > 0 ? 1 / secsPerReq : null;
 }
 
-export const CHART_METRICS = METRICS.filter((m) => m.chartable);
+// Cost-metric wording for the power basis: same ×HMVP quote, with board
+// power (kW) as the denominator instead of relative rental price.
+const POWER_RELABELS: Record<string, Pick<MetricDef, 'label' | 'desc'>> = {
+  requestEff: {
+    label: 'Requests/kW',
+    desc: 'Requests served per kW of chip power, quoted as a multiple vs the smallest H100 machine that can serve this model.',
+  },
+  prefillEff: {
+    label: 'Prefill tok/chip/kW',
+    desc: 'Prefill tokens per kW of chip power, quoted as a multiple vs the smallest H100 machine that can serve this model.',
+  },
+  decodeEff: {
+    label: 'Decode tok/chip/kW',
+    desc: 'Decode tokens per kW of chip power, quoted as a multiple vs the smallest H100 machine that can serve this model.',
+  },
+};
+
+const METRICS_BY_BASIS: Record<CostBasis, MetricDef[]> = {
+  price: METRICS,
+  power: METRICS.map((m) => (POWER_RELABELS[m.key] ? { ...m, ...POWER_RELABELS[m.key] } : m)),
+};
+
+export function chartMetricsFor(basis: CostBasis): MetricDef[] {
+  return METRICS_BY_BASIS[basis].filter((m) => m.chartable);
+}
 
 /** The cost metric filling each role — columns, SLA filters, and the
  * details panel consume it. */
@@ -274,8 +302,8 @@ export const SWEEP_METRIC_KEYS: readonly string[] = [
   'batchSaturation',
 ];
 
-export function metricByKey(key: string): MetricDef {
-  const m = METRICS.find((x) => x.key === key);
+export function metricByKey(key: string, basis: CostBasis = 'price'): MetricDef {
+  const m = METRICS_BY_BASIS[basis].find((x) => x.key === key);
   if (!m) throw new Error(`unknown metric ${key}`);
   return m;
 }

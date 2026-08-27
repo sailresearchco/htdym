@@ -18,13 +18,14 @@ import {
 } from '../results';
 import { fmtBytes, fmtInt, fmtMult, fmtParams, fmtPct, fmtSI } from '../format';
 import {
+  COST_KEYS,
   OVERVIEW_METRIC_KEYS,
   SWEEP_METRIC_KEYS,
   MetricDef,
   fmtMetricValue,
   metricByKey,
 } from '../metrics';
-import { HmvpBaseline, hmvpEff, relPriceOf } from '../pricing';
+import { CostBasis, HmvpBaseline, hmvpEff, relCostOf } from '../pricing';
 import { ProgressRing } from './ProgressRing';
 import { VendorLogo } from './VendorLogo';
 
@@ -32,6 +33,8 @@ interface Props {
   groups: UiGroup[];
   /** the ×HMVP reference, for the group stats' efficiency-ceiling column */
   baseline: HmvpBaseline | null;
+  /** what the eff columns divide by: relative price or relative power */
+  basis: CostBasis;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   hoveredId: string | null;
@@ -50,10 +53,15 @@ interface TipState {
   diagnostics: Diagnostic[];
 }
 
-const OVERVIEW_COLS = OVERVIEW_METRIC_KEYS.map(metricByKey);
-const SWEEP_COLS = SWEEP_METRIC_KEYS.map(metricByKey);
-
-export function Leaderboard({ groups, baseline, selectedId, onSelect, hoveredId, onHover }: Props) {
+export function Leaderboard({
+  groups,
+  baseline,
+  basis,
+  selectedId,
+  onSelect,
+  hoveredId,
+  onHover,
+}: Props) {
   // default ranking: the lead cost column — Requests/$ in the dollar view,
   // ×HMVP efficiency publicly (unpriced chips sink to the bottom)
   const [sort, setSort] = useState<SortState>({ key: OVERVIEW_METRIC_KEYS[0], dir: -1 });
@@ -61,7 +69,14 @@ export function Leaderboard({ groups, baseline, selectedId, onSelect, hoveredId,
   const [expanded, setExpanded] = useState<Map<string, boolean>>(new Map());
   const [tip, setTip] = useState<TipState | null>(null);
 
-  const rankMetric = metricByKey(sort.key);
+  // column defs follow the basis: same keys, cost labels swap $ ↔ kW
+  const overviewCols = useMemo(
+    () => OVERVIEW_METRIC_KEYS.map((k) => metricByKey(k, basis)),
+    [basis],
+  );
+  const sweepCols = useMemo(() => SWEEP_METRIC_KEYS.map((k) => metricByKey(k, basis)), [basis]);
+
+  const rankMetric = metricByKey(sort.key, basis);
 
   const ranked = useMemo(() => {
     const val = (r: UiResult) => rankMetric.value(r);
@@ -114,7 +129,7 @@ export function Leaderboard({ groups, baseline, selectedId, onSelect, hoveredId,
             <th className="lb-left">
               Best sharding <span className="by-metric">by {rankMetric.label}</span>
             </th>
-            {OVERVIEW_COLS.map((m) => (
+            {overviewCols.map((m) => (
               <th
                 key={m.key}
                 className="num sortable th-tip"
@@ -134,8 +149,9 @@ export function Leaderboard({ groups, baseline, selectedId, onSelect, hoveredId,
               key={g.key}
               group={g}
               baseline={baseline}
-              overviewCols={OVERVIEW_COLS}
-              sweepCols={SWEEP_COLS}
+              basis={basis}
+              overviewCols={overviewCols}
+              sweepCols={sweepCols}
               rank={gi + 1}
               open={isOpen(g.key)}
               onToggle={() => toggle(g.key)}
@@ -188,7 +204,7 @@ export function Leaderboard({ groups, baseline, selectedId, onSelect, hoveredId,
 // Which of the HMVP machine's per-metric reference configs a row is, by the
 // anchor ids the baseline recorded while folding its maxima.
 const ANCHOR_TIPS: Record<string, string> = {
-  Req: 'This sharding is the request reference: the cheapest whole-request config on the HMVP machine, so Requests/$ compares every config against it.',
+  Req: 'This sharding is the request reference: the cheapest whole-request config on the HMVP machine, so the request-efficiency column compares every config against it.',
   Prefill:
     'This sharding is the prefill reference: the fastest prefill config on the HMVP machine, so the prefill ×HMVP columns compare every config against it.',
   Decode:
@@ -233,6 +249,7 @@ export function ShardingPill({ r }: { r: UiResult }) {
 function GroupRows({
   group,
   baseline,
+  basis,
   overviewCols,
   sweepCols,
   rank,
@@ -250,6 +267,7 @@ function GroupRows({
 }: {
   group: UiGroup;
   baseline: HmvpBaseline | null;
+  basis: CostBasis;
   overviewCols: MetricDef[];
   sweepCols: MetricDef[];
   rank: number;
@@ -266,6 +284,9 @@ function GroupRows({
   hideTip: () => void;
 }) {
   const arrow = (key: string) => (rankKey === key ? (sortDir === 1 ? ' ↑' : ' ↓') : '');
+  // on the power basis a chip with no published TDP can't fill the cost
+  // columns — name the reason instead of a bare dash
+  const noTdp = basis === 'power' && group.chip.tdp === undefined;
   // configs arrive best-first with errors sunk, so [0] is the group's winner
   const best = group.configs[0];
   const bestUsable = best && !hasError(best) ? best : null;
@@ -325,7 +346,13 @@ function GroupRows({
         </td>
         {overviewCols.map((m) => (
           <td key={m.key} className={`num mono ${m.key === rankKey ? 'lb-best' : ''}`}>
-            {bestUsable ? <HeadlineCell m={m} r={bestUsable} /> : '—'}
+            {noTdp && COST_KEY_SET.has(m.key) ? (
+              <UnknownTdp vendor={group.chip.vendor} />
+            ) : bestUsable ? (
+              <HeadlineCell m={m} r={bestUsable} />
+            ) : (
+              '—'
+            )}
           </td>
         ))}
         <td className="num">
@@ -351,6 +378,7 @@ function GroupRows({
             <GroupStats
               group={group}
               baseline={baseline}
+              basis={basis}
               best={bestUsable}
               selectedId={selectedId}
               onSelect={onSelect}
@@ -418,7 +446,13 @@ function GroupRows({
                           key={m.key}
                           className={`num mono ${m.key === rankKey ? 'lb-best' : ''}`}
                         >
-                          {hasError(r) ? '—' : <HeadlineCell m={m} r={r} />}
+                          {noTdp && COST_KEY_SET.has(m.key) ? (
+                            <UnknownTdp vendor={group.chip.vendor} />
+                          ) : hasError(r) ? (
+                            '—'
+                          ) : (
+                            <HeadlineCell m={m} r={r} />
+                          )}
                         </td>
                       ))}
                     </tr>
@@ -445,6 +479,7 @@ const attainTone = (frac: number) => (frac >= 0.9 ? 'c-ok' : frac >= 0.5 ? 'c-wa
 function GroupStats({
   group,
   baseline,
+  basis,
   best,
   selectedId,
   onSelect,
@@ -453,6 +488,7 @@ function GroupStats({
 }: {
   group: UiGroup;
   baseline: HmvpBaseline | null;
+  basis: CostBasis;
   best: UiResult | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
@@ -476,7 +512,9 @@ function GroupStats({
   const chip = group.chip;
   // the cost column's bound: best possible ×HMVP efficiency, at ceiling
   const costBound = (ceilingTokPerSec: number, baseRate: number | undefined) => {
-    const rel = relPriceOf(chip);
+    const rel = relCostOf(chip, basis);
+    if (rel === undefined && basis === 'power' && chip.tdp === undefined)
+      return <UnknownTdp vendor={chip.vendor} />;
     return rel !== undefined && baseRate
       ? `≤ ${fmtMult(hmvpEff(ceilingTokPerSec, rel, baseRate))}`
       : '—';
@@ -537,7 +575,7 @@ function GroupStats({
         % of ceiling
       </span>
       <span
-        title="Best possible cost efficiency on this chip: ceiling rate ÷ price relative to H100, as a multiple of the Hopper MVP baseline."
+        title={`Best possible cost efficiency on this chip: ceiling rate ÷ ${basis === 'power' ? 'power' : 'price'} relative to H100, as a multiple of the Hopper MVP baseline.`}
         className="gstats-h"
       >
         Eff. ceiling
@@ -691,6 +729,21 @@ function GroupStats({
 }
 
 /** Predicted value at the tuned overlap; % of ceiling renders as a small attainment bar. */
+// the columns that divide by the cost basis, and so have nothing to show
+// for a chip with no published TDP on the power basis
+const COST_KEY_SET = new Set<string>(Object.values(COST_KEYS));
+
+function UnknownTdp({ vendor }: { vendor: string }) {
+  return (
+    <span
+      className="muted"
+      data-tip={`${vendor} does not publish this chip's TDP, so per-kW efficiency can't be computed.`}
+    >
+      Unknown TDP
+    </span>
+  );
+}
+
 function HeadlineCell({ m, r }: { m: MetricDef; r: UiResult }) {
   const v = m.value(r);
   if (v === null || !Number.isFinite(v)) return <>—</>;

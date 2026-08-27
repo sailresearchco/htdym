@@ -499,6 +499,7 @@ function specJson(c: UiChip): string {
     hbmCapacity: c.hbmCapacity,
     hbmBandwidth: c.hbmBandwidth,
     interconnect: c.interconnect,
+    ...(c.tdp !== undefined && { tdp: c.tdp }),
     ...(c.matmulSatRows !== undefined && { matmulSatRows: c.matmulSatRows }),
   };
   return JSON.stringify(spec, null, 2).replace(/-?\d[\d.]*(e[+-]?\d+)?/g, (s) => {

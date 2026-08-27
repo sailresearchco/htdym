@@ -27,6 +27,12 @@ export interface ChipSpec {
   // Rental $/chip-hour, rounded so each price ÷ the H100's 1.8 lands on a
   // clean public multiplier (the UI quotes prices relative to the H100).
   costPerHour?: number;
+  // Thermal design power per chip in watts, the per-kW efficiency view's
+  // denominator (quoted relative to the H100 the way prices are). Vendor
+  // datasheet figures where published, credible third-party estimates
+  // (Epoch AI, SemiAnalysis) where not; omitted entirely when neither
+  // exists — the chip then shows no per-kW efficiency.
+  tdp?: number;
   // Fraction of the datasheet matmul rate a well-tuned, well-shaped GEMM
   // sustains (sustained clocks, kernel quality). Derates compute pricing
   // only; shape-dependent padding is priced separately via matmulSatRows.
@@ -132,6 +138,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.85,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.81,
+    tdp: 400,
   },
   {
     id: 'h100-sxm',
@@ -163,6 +170,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 1.8,
+    tdp: 700,
   },
   {
     id: 'h200-sxm',
@@ -188,11 +196,11 @@ export const CHIPS: ChipSpec[] = [
       domainSize: 8,
       scaleOut: { bandwidthPerChip: 50e9, latency: 5e-6, maxNodes: 8 },
     },
-    // same GH100 silicon: sustained GEMM as H100; copy kernels ~0.85-0.9 (thin
-    // data)
+    // same GH100 silicon: sustained GEMM as H100; copy kernels ~0.85-0.9
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 2.25,
+    tdp: 700,
   },
   {
     id: 'b200',
@@ -212,7 +220,6 @@ export const CHIPS: ChipSpec[] = [
     hbmBandwidth: 7.7e12,
     // NVLink 5: 1.8 TB/s bidirectional -> 900 GB/s one-way, HGX board of 8.
     // Scale-out: DGX B200, one CX-7 400 Gb/s NIC per GPU -> 50 GB/s one-way
-    // (REVIEW: CX-8 800G platforms exist), 8 nodes.
     interconnect: {
       bandwidthPerChip: 900e9,
       latency: 2e-6,
@@ -224,6 +231,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 3.6,
+    tdp: 1000,
   },
   {
     id: 'gb200-nvl72',
@@ -251,6 +259,8 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 4.5,
+    // the 2.7 kW superchip minus ~300 W of Grace, over its 2 GPUs
+    tdp: 1200,
   },
   {
     id: 'b300',
@@ -277,19 +287,17 @@ export const CHIPS: ChipSpec[] = [
     hbmBandwidth: 8e12,
     // NVLink 5: the system's 14.4 TB/s aggregate over 8 GPUs is 1.8 TB/s
     // bidirectional each -> 900 GB/s one-way, as on B200.
-    // Scale-out: one 800 Gb/s ConnectX-8 per GPU -> 100 GB/s one-way. This
-    // is the CX-8 platform the B200 entry's REVIEW note anticipated.
+    // Scale-out: one 800 Gb/s ConnectX-8 per GPU -> 100 GB/s one-way.
     interconnect: {
       bandwidthPerChip: 900e9,
       latency: 2e-6,
       domainSize: 8,
       scaleOut: { bandwidthPerChip: 100e9, latency: 5e-6, maxNodes: 8 },
     },
-    // REVIEW: no published MAMF for this part. Carried over from B200,
-    // which is the same silicon family on the same HBM3e at 8 TB/s.
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 5.4,
+    tdp: 1400,
   },
   {
     id: 'vr100-nvl72',
@@ -315,6 +323,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.7,
     realizableHbmBwFrac: 0.8,
     // unannounced part, no public price
+    tdp: 2300, // semianalysis rumor (update on release!)
   },
   {
     id: 'rtx-pro-6000',
@@ -334,10 +343,9 @@ export const CHIPS: ChipSpec[] = [
     hbmCapacity: 96e9,
     hbmBandwidth: 1.792e12,
     // No NVLink: PCIe 5.0 x16 only, 64 GB/s one-way. Modeled as a switched
-    // 8-GPU PCIe server. REVIEW: real PCIe collectives route via host/switch
-    // and land well below this.
+    // 8-GPU PCIe server.
     // Scale-out: no vendor fabric; modeled as one 100 GbE NIC per GPU ->
-    // 12.5 GB/s one-way, 8 nodes. REVIEW: commodity Ethernet, varies widely.
+    // 12.5 GB/s one-way, 8 nodes.
     interconnect: {
       bandwidthPerChip: 64e9,
       latency: 5e-6,
@@ -349,6 +357,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 1.26,
+    tdp: 600,
   },
   {
     id: 'rtx-5090',
@@ -369,10 +378,9 @@ export const CHIPS: ChipSpec[] = [
     hbmCapacity: 32e9,
     hbmBandwidth: 1.792e12,
     // No NVLink: PCIe 5.0 x16 only, 64 GB/s one-way. Modeled as a switched
-    // 8-GPU PCIe server, as RTX PRO 6000 above. REVIEW: real PCIe collectives
-    // route via host/switch and land well below this.
+    // 8-GPU PCIe server, as RTX PRO 6000 above.
     // Scale-out: no vendor fabric; one 100 GbE NIC per GPU -> 12.5 GB/s
-    // one-way, 8 nodes. REVIEW: commodity Ethernet, varies widely.
+    // one-way, 8 nodes.
     interconnect: {
       bandwidthPerChip: 64e9,
       latency: 5e-6,
@@ -384,6 +392,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.95,
     costPerHour: 0.54,
+    tdp: 575,
   },
   {
     id: 'rtx-4090',
@@ -404,7 +413,7 @@ export const CHIPS: ChipSpec[] = [
     // No NVLink: PCIe 4.0 x16 only, ~32 GB/s one-way. Modeled as a switched
     // 8-GPU PCIe server, as RTX PRO 6000 above.
     // Scale-out: no vendor fabric; one 100 GbE NIC per GPU -> 12.5 GB/s
-    // one-way, 8 nodes. REVIEW: commodity Ethernet, varies widely.
+    // one-way, 8 nodes.
     interconnect: {
       bandwidthPerChip: 32e9,
       latency: 5e-6,
@@ -415,6 +424,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.9,
     costPerHour: 0.36,
+    tdp: 450,
   },
   {
     id: 'mi300x',
@@ -446,6 +456,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.5,
     realizableHbmBwFrac: 0.8,
     costPerHour: 2.16,
+    tdp: 750,
   },
   {
     id: 'mi325x',
@@ -473,6 +484,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.6,
     realizableHbmBwFrac: 0.8,
     costPerHour: 2.7,
+    tdp: 1000,
   },
   {
     id: 'mi355x',
@@ -490,10 +502,8 @@ export const CHIPS: ChipSpec[] = [
     hbmCapacity: 288e9,
     hbmBandwidth: 8e12,
     // 8-GPU UBB, fully connected: 7 IF4 links x 153.6 GB/s bidirectional
-    // = 1075 GB/s bidi -> 537 GB/s one-way egress. REVIEW: some AMD materials
-    // quote 896 GB/s bidi for the MI350 platform.
-    // Scale-out: one 400 GbE RoCE NIC per GPU (REVIEW: 800G platforms
-    // shipping), 8 nodes.
+    // = 1075 GB/s bidi -> 537 GB/s one-way egress.
+    // Scale-out: one 400 GbE RoCE NIC per GPU, 8 nodes.
     interconnect: {
       bandwidthPerChip: 537e9,
       latency: 2e-6,
@@ -505,6 +515,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.65,
     realizableHbmBwFrac: 0.7,
     costPerHour: 3.6,
+    tdp: 1400,
   },
   {
     id: 'gaudi2',
@@ -525,6 +536,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.3, // penalty for software stack being horrible sorry
     realizableHbmBwFrac: 0.8,
     costPerHour: 0.54,
+    tdp: 600,
   },
   {
     id: 'gaudi3',
@@ -545,6 +557,8 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.3, // penalty for software stack being horrible sorry
     realizableHbmBwFrac: 0.75,
     costPerHour: 1.26,
+    // liquid-cooled rating; the air-cooled OAM runs 900 W
+    tdp: 1200,
   },
   {
     id: 'inferentia2',
@@ -568,6 +582,8 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.55,
     realizableHbmBwFrac: 0.6,
     costPerHour: 0.36,
+    // no tdp: AWS publishes none and no third party has estimated one, so
+    // the chip sits out the per-kW view rather than carry a guess
   },
   {
     id: 'trainium1',
@@ -590,6 +606,10 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.55,
     realizableHbmBwFrac: 0.6,
     costPerHour: 0.45,
+    // no tdp: AWS publishes none and no third party has estimated one, so
+    // the chip sits out the per-kW view rather than carry a guess (AWS's
+    // Trainium2 launch claim — 4x training perf at 2x perf/W — would put it
+    // near half Trainium2's ~500 W if an estimate is ever wanted)
   },
   {
     id: 'trainium2',
@@ -614,6 +634,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.55,
     realizableHbmBwFrac: 0.7,
     costPerHour: 0.9,
+    tdp: 500, // semianalysis rumor
   },
   {
     id: 'tpu-v5e',
@@ -635,6 +656,9 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.9,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.36,
+    // REVIEW: Google publishes no TDP; NextPlatform/Epoch AI estimate
+    // (SemiAnalysis says 300 W)
+    tdp: 225,
   },
   {
     id: 'tpu-v5p',
@@ -658,6 +682,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.9,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.81,
+    tdp: 540, // Epoch AI derivation from Google's perf/W disclosures
   },
   {
     id: 'tpu-v6e',
@@ -678,6 +703,7 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.9,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.594,
+    tdp: 380, // Epoch AI derivation from Google's perf/W disclosures, SemiAnalysis estimates ~300 W
   },
   {
     id: 'tpu-v7x',
@@ -705,6 +731,9 @@ export const CHIPS: ChipSpec[] = [
     realizableFlopsFrac: 0.85,
     realizableHbmBwFrac: 0.85,
     costPerHour: 4.5,
+    // Epoch AI derivation from Google's perf/W disclosures; the
+    // 9216-chip-pod ≈ 10 MW claim lands ~1.08 kW/chip with overhead
+    tdp: 960,
   },
 ];
 

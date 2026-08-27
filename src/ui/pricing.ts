@@ -3,8 +3,9 @@
  *
  * The tool never shows a dollar: chip prices display relative to the H100,
  * and the cost metrics quote "×HMVP" efficiency — throughput per unit of
- * relative price, as a multiple of the same figure for the Hopper MVP, the
- * smallest H100 machine that can serve the model.
+ * relative cost, as a multiple of the same figure for the Hopper MVP, the
+ * smallest H100 machine that can serve the model. The cost a chip is charged
+ * is either its rental price or its board power, both relative to the H100.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { roofline, Roofline } from '../core/engine/roofline';
@@ -16,9 +17,16 @@ import { makeSearchClient } from './searchClient';
 
 export const H100_ID = 'h100-sxm';
 
+/** What the efficiency metrics divide throughput by: rental price or board
+ * power, each relative to the H100. */
+export type CostBasis = 'price' | 'power';
+
 // The anchor every relative price divides by: the H100's default list $/hr.
 // The live-edited H100 never moves it, so ratios stay stable under edits.
 const H100_DOLLARS_PER_HOUR = CHIPS_BY_ID[H100_ID].costPerHour!;
+
+// The per-kW view's anchor: the H100's board power.
+const H100_TDP = CHIPS_BY_ID[H100_ID].tdp!;
 
 /** A chip's hourly price as a multiple of the H100's — the only form of
  * price the public build displays. */
@@ -26,15 +34,25 @@ export function relPriceOf(chip: { costPerHour?: number }): number | undefined {
   return chip.costPerHour !== undefined ? chip.costPerHour / H100_DOLLARS_PER_HOUR : undefined;
 }
 
+/** A chip's relative cost on the active basis: ×H100 price or ×H100 power. */
+export function relCostOf(
+  chip: { costPerHour?: number; tdp?: number },
+  basis: CostBasis,
+): number | undefined {
+  if (basis === 'power') return chip.tdp !== undefined ? chip.tdp / H100_TDP : undefined;
+  return relPriceOf(chip);
+}
+
 /** Inverse of relPriceOf, for the sidebar's relative-price input. */
 export function relPriceToDollars(rel: number): number {
   return rel * H100_DOLLARS_PER_HOUR;
 }
 
-/** The ×HMVP quote: throughput per unit of relative price, as a multiple of
- * the baseline rate. The one definition every eff display shares. */
-export function hmvpEff(rate: number, relPrice: number, baseRate: number): number {
-  return rate / relPrice / baseRate;
+/** The ×HMVP quote: throughput per unit of relative cost (price or power),
+ * as a multiple of the baseline rate. The one definition every eff display
+ * shares. */
+export function hmvpEff(rate: number, relCost: number, baseRate: number): number {
+  return rate / relCost / baseRate;
 }
 
 /** Chip-seconds to serve one request of T prefill + S decode tokens. */

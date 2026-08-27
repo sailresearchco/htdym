@@ -8,6 +8,7 @@ import type { ShardingRole } from '../../core/engine/sim/ir/sharding/roles';
 import { naiveOverlapBreakdown } from '../../core/engine/sim/cost/helpers/naiveOverlap';
 import { fmtBytes, fmtInt, fmtPct, fmtSI, fmtTime } from '../format';
 import { COST_KEYS, metricByKey } from '../metrics';
+import { CostBasis } from '../pricing';
 import {
   Boundedness,
   ComponentTimes,
@@ -27,10 +28,12 @@ interface Props {
   group: UiGroup;
   model: ModelSpec;
   overlap: UiOverlap;
+  /** active cost basis, for the eff rows' $ ↔ kW labels */
+  basis: CostBasis;
   onClose: () => void;
 }
 
-export function DetailsPanel({ result: r, group, model, overlap, onClose }: Props) {
+export function DetailsPanel({ result: r, group, model, overlap, basis, onClose }: Props) {
   const chip = group.chip;
   const mem = r.memory;
   const dec = r.decode;
@@ -69,7 +72,7 @@ export function DetailsPanel({ result: r, group, model, overlap, onClose }: Prop
         <>
           <div className="details-sect">Prefill</div>
           <dl className="kv">
-            <CostRow role="prefill" r={r} />
+            <CostRow role="prefill" r={r} basis={basis} />
           </dl>
           <GaugeRow
             tip="Saturated prefill rate per chip at the Memory/Comms overlap you set. The gauge's full width is the compute-roofline ceiling — the best any sharding of this model could prefill on this hardware at its Realizable FLOPs setting, so the gap is sharding losses, not kernel efficiency."
@@ -101,7 +104,7 @@ export function DetailsPanel({ result: r, group, model, overlap, onClose }: Prop
         <>
           <div className="details-sect">Decode</div>
           <dl className="kv">
-            <CostRow role="decode" r={r} />
+            <CostRow role="decode" r={r} basis={basis} />
           </dl>
           <GaugeRow
             tip="Decode rate per chip at the operating batch and the Memory/Comms overlap you set. The gauge's full width is the B = ∞ ideal-sharding ceiling — the best any sharding of this model could decode on this hardware at its Realizable FLOPs / HBM BW settings. The tick marks this sharding's own B = ∞ saturation rate: the bar can grow to the tick with more KV room, but never past it."
@@ -138,7 +141,7 @@ export function DetailsPanel({ result: r, group, model, overlap, onClose }: Prop
         </>
       )}
 
-      <WorkloadCost r={r} />
+      <WorkloadCost r={r} basis={basis} />
 
       {(dec || pf) && (
         <>
@@ -172,8 +175,16 @@ export function DetailsPanel({ result: r, group, model, overlap, onClose }: Prop
 }
 
 /** One phase's ×HMVP cost line; empty when it can't be computed (no price). */
-function CostRow({ role, r }: { role: 'prefill' | 'decode'; r: UiResult }) {
-  const m = metricByKey(COST_KEYS[role]);
+function CostRow({
+  role,
+  r,
+  basis,
+}: {
+  role: 'prefill' | 'decode';
+  r: UiResult;
+  basis: CostBasis;
+}) {
+  const m = metricByKey(COST_KEYS[role], basis);
   if (m.value(r) === null) return null;
   return (
     <>
@@ -184,8 +195,8 @@ function CostRow({ role, r }: { role: 'prefill' | 'decode'; r: UiResult }) {
 }
 
 /** The whole-request ×HMVP section. */
-function WorkloadCost({ r }: { r: UiResult }) {
-  const m = metricByKey(COST_KEYS.request);
+function WorkloadCost({ r, basis }: { r: UiResult; basis: CostBasis }) {
+  const m = metricByKey(COST_KEYS.request, basis);
   if (m.value(r) === null) return null;
   const { prefillLen, generateLen } = r.workload;
   return (

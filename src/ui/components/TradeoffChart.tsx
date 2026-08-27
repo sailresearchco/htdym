@@ -12,12 +12,15 @@ import {
 } from 'recharts';
 import { ChipSpec } from '../../core/hardware/chips';
 import { UiResult, hasError, hasWarning } from '../results';
-import { CHART_METRICS, fmtMetricValue, metricByKey } from '../metrics';
+import { MetricDef, chartMetricsFor, fmtMetricValue, metricByKey } from '../metrics';
+import { CostBasis } from '../pricing';
 import { VENDOR_COLORS } from './VendorLogo';
 
 interface Props {
   results: UiResult[];
   chipsById: Record<string, ChipSpec>;
+  /** active cost basis, for the eff axes' $ ↔ kW labels */
+  basis: CostBasis;
   hoveredId: string | null;
   onHover: (id: string | null) => void;
   /** click a point to open its details slide-over */
@@ -195,7 +198,7 @@ function rSquared(xs: number[], ys: number[], coeffs: number[]): number {
   return 1 - ssRes / ssTot;
 }
 
-export function TradeoffChart({ results, chipsById, hoveredId, onHover, onSelect }: Props) {
+export function TradeoffChart({ results, chipsById, basis, hoveredId, onHover, onSelect }: Props) {
   const [xKey, setXKey] = useState('prefillEff');
   const [yKey, setYKey] = useState('decodeEff');
   const [logX, setLogX] = useState(false);
@@ -205,8 +208,8 @@ export function TradeoffChart({ results, chipsById, hoveredId, onHover, onSelect
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const chartBoxRef = useRef<HTMLDivElement>(null);
 
-  const xm = metricByKey(xKey);
-  const ym = metricByKey(yKey);
+  const xm = metricByKey(xKey, basis);
+  const ym = metricByKey(yKey, basis);
 
   const byChip = useMemo(() => {
     const groups = new Map<string, ChipSeries>();
@@ -327,8 +330,22 @@ export function TradeoffChart({ results, chipsById, hoveredId, onHover, onSelect
   return (
     <div className="chart-panel">
       <div className="axis-controls">
-        <AxisPicker label="X" value={xKey} onChange={setXKey} log={logX} onLog={setLogX} />
-        <AxisPicker label="Y" value={yKey} onChange={setYKey} log={logY} onLog={setLogY} />
+        <AxisPicker
+          label="X"
+          metrics={chartMetricsFor(basis)}
+          value={xKey}
+          onChange={setXKey}
+          log={logX}
+          onLog={setLogX}
+        />
+        <AxisPicker
+          label="Y"
+          metrics={chartMetricsFor(basis)}
+          value={yKey}
+          onChange={setYKey}
+          log={logY}
+          onLog={setLogY}
+        />
         <label className="check">
           <input
             type="checkbox"
@@ -584,6 +601,7 @@ function Marker(props: {
 
 function AxisPicker(props: {
   label: string;
+  metrics: MetricDef[];
   value: string;
   onChange: (v: string) => void;
   log: boolean;
@@ -593,7 +611,7 @@ function AxisPicker(props: {
     <div className="axis-picker">
       <span className="axis-label">{props.label}</span>
       <select value={props.value} onChange={(e) => props.onChange(e.target.value)}>
-        {CHART_METRICS.map((m) => (
+        {props.metrics.map((m) => (
           <option key={m.key} value={m.key}>
             {m.label}
           </option>

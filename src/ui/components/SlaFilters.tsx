@@ -5,6 +5,7 @@
  */
 import { useMemo } from 'react';
 import { COST_KEYS, fmtMetricValue, metricByKey } from '../metrics';
+import { CostBasis } from '../pricing';
 import { UiGroup, UiResult, hasError } from '../results';
 
 export interface SlaFilterDef {
@@ -39,12 +40,12 @@ export const SLA_FILTERS: SlaFilterDef[] = [
   {
     metricKey: COST_KEYS.prefill,
     dir: 'min',
-    tip: 'Hide configs below this prefill cost-efficiency vs the Hopper MVP baseline. Unpriced chips are hidden while this is set.',
+    tip: 'Hide configs below this prefill cost-efficiency vs the Hopper MVP baseline. Chips without a price/power figure are hidden while this is set.',
   },
   {
     metricKey: COST_KEYS.decode,
     dir: 'min',
-    tip: 'Hide configs below this decode cost-efficiency vs the Hopper MVP baseline. Unpriced chips are hidden while this is set.',
+    tip: 'Hide configs below this decode cost-efficiency vs the Hopper MVP baseline. Chips without a price/power figure are hidden while this is set.',
   },
   {
     metricKey: 'kvSpacePerChip',
@@ -79,12 +80,14 @@ const STEPS = 400;
 interface PanelProps {
   /** unfiltered groups: slider ranges must not shrink as filters bite */
   groups: UiGroup[];
+  /** active cost basis, for the eff filters' $ ↔ kW labels */
+  basis: CostBasis;
   thresholds: SlaThresholds;
   onChange: (metricKey: string, value: number | undefined) => void;
   onReset: () => void;
 }
 
-export function SlaFilterPanel({ groups, thresholds, onChange, onReset }: PanelProps) {
+export function SlaFilterPanel({ groups, basis, thresholds, onChange, onReset }: PanelProps) {
   // data-driven slider range per filter: the spread of that metric across
   // every feasible config currently priced/streamed
   const bounds = useMemo(() => {
@@ -129,6 +132,7 @@ export function SlaFilterPanel({ groups, thresholds, onChange, onReset }: PanelP
           <SlaSlider
             key={f.metricKey}
             def={f}
+            basis={basis}
             bounds={bounds[f.metricKey]}
             value={thresholds[f.metricKey]}
             onChange={(v) => onChange(f.metricKey, v)}
@@ -141,16 +145,18 @@ export function SlaFilterPanel({ groups, thresholds, onChange, onReset }: PanelP
 
 function SlaSlider({
   def,
+  basis,
   bounds,
   value,
   onChange,
 }: {
   def: SlaFilterDef;
+  basis: CostBasis;
   bounds?: [number, number];
   value?: number;
   onChange: (v: number | undefined) => void;
 }) {
-  const m = metricByKey(def.metricKey);
+  const m = metricByKey(def.metricKey, basis);
   const [lo, hi] = bounds ?? [1, 1];
   const llo = Math.log(lo);
   const lhi = Math.log(hi);

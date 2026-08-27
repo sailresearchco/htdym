@@ -9,7 +9,14 @@ import { Sidebar, SweepControls } from './components/Sidebar';
 import { SlaFilterPanel, SlaThresholds, passesSla } from './components/SlaFilters';
 import { TradeoffChart } from './components/TradeoffChart';
 import { UiChip, UiGroup, UiResult, UiWorkload, hasError, ringTone } from './results';
-import { H100_ID, hmvpEff, relPriceOf, requestChipSecs, useHmvpBaseline } from './pricing';
+import {
+  CostBasis,
+  H100_ID,
+  hmvpEff,
+  relCostOf,
+  requestChipSecs,
+  useHmvpBaseline,
+} from './pricing';
 import { makeSearchClient } from './searchClient';
 import {
   machineAtNodes,
@@ -97,6 +104,8 @@ export function App() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<'table' | 'chart'>('table');
+  // what the eff metrics divide by: ×H100 rental price or ×H100 board power
+  const [costBasis, setCostBasis] = useState<CostBasis>('price');
   // active SLA targets by metric key; the panel toggles from the toolbar
   const [sla, setSla] = useState<SlaThresholds>({});
   const [slaOpen, setSlaOpen] = useState(false);
@@ -241,8 +250,9 @@ export function App() {
     return () => clearTimeout(t);
   }, [model, workload, sweep, chips]);
 
-  // ×HMVP efficiencies are derived here from the live prices and the baseline
-  // (not in the worker), so price edits reprice existing rows without a search
+  // ×HMVP efficiencies are derived here from the live prices/powers and the
+  // baseline (not in the worker), so basis flips and price edits reprice
+  // existing rows without a search
   const groupList = useMemo(() => {
     const order = new Map(chips.map((c, i) => [c.id, i]));
     const basePf = baseline?.prefillTokPerSecPerChip;
@@ -252,7 +262,7 @@ export function App() {
       chip: ChipSpec,
       baseRate: number | undefined,
     ) => {
-      const rel = relPriceOf(chip);
+      const rel = relCostOf(chip, costBasis);
       return (
         s && {
           ...s,
@@ -267,7 +277,7 @@ export function App() {
     // from the per-phase maxima the phase columns normalize by
     const baseReq = baseline?.requestChipSeconds;
     const requestEff = (r: UiResult, chip: ChipSpec): number | undefined => {
-      const rel = relPriceOf(chip);
+      const rel = relCostOf(chip, costBasis);
       if (rel === undefined || baseReq === undefined || !r.prefill || !r.decode) return undefined;
       const { prefillLen: T, generateLen: S } = r.workload;
       const secs = requestChipSecs(T, S, r.prefill.tokPerSecPerChip, r.decode.tokPerSecPerChip);
@@ -314,7 +324,7 @@ export function App() {
       .sort(
         (a, b) => (order.get(a.chip.id) ?? 0) - (order.get(b.chip.id) ?? 0) || a.nChips - b.nChips,
       );
-  }, [groups, chips, baseline]);
+  }, [groups, chips, baseline, costBasis]);
 
   const visibleGroups = useMemo(() => {
     const q = filterText.trim().toLowerCase();
@@ -432,6 +442,26 @@ export function App() {
                 Chart
               </button>
             </div>
+            <div className="seg" role="tablist" aria-label="Efficiency basis">
+              <button
+                role="tab"
+                aria-selected={costBasis === 'price'}
+                className={costBasis === 'price' ? 'on' : ''}
+                title="Quote the efficiency columns per unit of rental price (relative to one H100)"
+                onClick={() => setCostBasis('price')}
+              >
+                per $
+              </button>
+              <button
+                role="tab"
+                aria-selected={costBasis === 'power'}
+                className={costBasis === 'power' ? 'on' : ''}
+                title="Quote the efficiency columns per kW of chip power instead of price"
+                onClick={() => setCostBasis('power')}
+              >
+                per kW
+              </button>
+            </div>
             <input
               className="search"
               type="search"
@@ -464,6 +494,7 @@ export function App() {
           {slaOpen && (
             <SlaFilterPanel
               groups={groupList}
+              basis={costBasis}
               thresholds={sla}
               onChange={setSlaThreshold}
               onReset={() => setSla({})}
@@ -474,6 +505,7 @@ export function App() {
               <Leaderboard
                 groups={visibleGroups}
                 baseline={baseline}
+                basis={costBasis}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
                 hoveredId={hoveredId}
@@ -483,6 +515,7 @@ export function App() {
               <TradeoffChart
                 results={allResults.filter((r) => !hasError(r))}
                 chipsById={chipsById}
+                basis={costBasis}
                 hoveredId={hoveredId}
                 onHover={setHoveredId}
                 onSelect={setSelectedId}
@@ -494,6 +527,7 @@ export function App() {
                 group={selected.group}
                 model={model}
                 overlap={overlap}
+                basis={costBasis}
                 onClose={() => setSelectedId(null)}
               />
             )}
