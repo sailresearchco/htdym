@@ -3,6 +3,7 @@ import { CHIPS, ChipSpec } from '../core/hardware/chips';
 import { MODEL_PRESETS, ModelSpec } from '../core/model/models';
 import { DetailsPanel } from './components/DetailsPanel';
 import { Leaderboard } from './components/Leaderboard';
+import { PriceNotice } from './components/PriceNotice';
 import { ProgressRing } from './components/ProgressRing';
 import { Sidebar, SweepControls } from './components/Sidebar';
 import { SlaFilterPanel, SlaThresholds, passesSla } from './components/SlaFilters';
@@ -359,6 +360,7 @@ export function App() {
 
   return (
     <div className="app">
+      <PriceNotice />
       <header className="topbar">
         <SailResearchLogo />
         <div className="topbar-actions">

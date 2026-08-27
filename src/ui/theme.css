@@ -1290,7 +1290,7 @@ table.lb-sweep {
 .diag-tooltip {
   position: fixed;
   z-index: 10;
-  max-width: 380px;
+  max-width: 360px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -2201,4 +2201,59 @@ th.th-tip {
 .op-dag-count {
   margin-left: auto;
   font-family: var(--mono);
+}
+
+/* ------------------------- first-visit price notice --------------------- */
+.notice-backdrop {
+  position: fixed;
+  inset: 0;
+  /* above every panel and tooltip (max elsewhere is 10) */
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(32, 33, 36, 0.34);
+  backdrop-filter: blur(2px);
+}
+:root[data-theme='dark'] .notice-backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.notice {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-tooltip);
+  padding: 20px 22px 18px;
+}
+.notice-title {
+  font: 500 14px var(--font-display);
+  margin: 0 0 10px;
+  color: var(--text);
+}
+.notice p {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  margin: 0 0 10px;
+}
+.notice-ok {
+  display: block;
+  margin-left: auto;
+  font: 500 12px var(--font);
+  color: var(--status-text);
+  background: var(--blue);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.notice-ok:hover {
+  filter: brightness(1.08);
+}
+.notice-ok:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
