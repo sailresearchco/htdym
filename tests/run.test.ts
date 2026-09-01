@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest';
 import { evaluatePrefill } from '../src/core/engine/sim/run/prefill';
 import { evaluateDecodeAtBatch } from '../src/core/engine/sim/run/decode';
+import { memoryFootprint } from '../src/core/engine/sim/run/memory';
+import { partitionIntoStages } from '../src/core/engine/sim/lowering/stages';
 import { makeNaiveOpCostSumBackend } from '../src/core/engine/sim/cost/naiveOpCostSum';
 import { naiveOpCost } from '../src/core/engine/sim/cost/helpers/naiveOpCost';
 import { OpId } from '../src/core/engine/sim/ir/ops';
@@ -31,6 +33,56 @@ test('validateInput gates weights past HBM capacity', () => {
     workload: { prefillLen: 128, generateLen: 0 },
   });
   expect(diags.map((x) => x.code)).toContain('weights-dont-fit');
+});
+
+test('prefill capacity counts DPA groups and pipeline microbatches', () => {
+  const model = MODEL_PRESETS.find((m) => m.name === 'LLaMA 3 8B')!;
+  const workload = { prefillLen: 512, generateLen: 256 };
+  const axes = deployedAxes(h100.interconnect, { domain: 8, nodes: 1 });
+  const mesh = makeMesh(
+    axes,
+    { DPA: ['D1'], TP: [], EP: [], ETP: ['D1'], PP: ['D0'] },
+    { D: [2, 4] },
+  );
+  const deployment = (chip: ChipSpec): Deployment => ({
+    chip,
+    mesh,
+    moeDispatch: 'ring-of-experts',
+  });
+  const stages = partitionIntoStages(model, 2);
+  const perStage = stages.map((stage) =>
+    memoryFootprint(model, deployment(idealTiles), [stage], workload.prefillLen),
+  );
+  const chipWithCapacity = (residentSeqs: number): ChipSpec => ({
+    ...idealTiles,
+    hbmCapacity: Math.max(
+      ...perStage.map(
+        (memory) => memory.weightBytesPerChip + residentSeqs * memory.kvBytesPerSeqPerChip,
+      ),
+    ),
+  });
+  const input = { model, deployment: deployment(chipWithCapacity(2)), workload };
+
+  expect(memoryFootprint(model, input.deployment, stages, workload.prefillLen)).toMatchObject({
+    maxResidentSeqsPerChip: 2,
+  });
+  expect(
+    memoryFootprint(model, input.deployment, stages, workload.prefillLen + workload.generateLen),
+  ).toMatchObject({ maxResidentSeqsPerChip: 1 });
+  expect(evaluatePrefill(input, 4, 'throughput', { costBackend: backend }).ok).toBe(true);
+
+  const overflow = evaluatePrefill(input, 8, 'throughput', { costBackend: backend });
+  expect(overflow.ok).toBe(false);
+  expect(overflow.diags.map((diag) => diag.code)).toContain('kv-no-room');
+  expect(
+    evaluatePrefill(input, 8, 'throughput', { costBackend: backend, ignoreKvCapacity: true }).ok,
+  ).toBe(true);
+
+  const ttftInput = { model, deployment: deployment(chipWithCapacity(1)), workload };
+  expect(memoryFootprint(model, ttftInput.deployment, stages, workload.prefillLen)).toMatchObject({
+    maxResidentSeqsPerChip: 1,
+  });
+  expect(evaluatePrefill(ttftInput, 1, 'ttft', { costBackend: backend }).ok).toBe(true);
 });
 
 test('a width the chip has no unit for widens to one it has, with a warning', () => {

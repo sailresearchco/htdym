@@ -1,10 +1,12 @@
 import { roleSize, totalChips } from '../../surface/deploy';
+import type { Diagnostic } from '../../surface/deploy';
 import type { CostBackend } from '../cost/types';
 import { lowerStage } from '../lowering/lower';
 import { partitionIntoStages } from '../lowering/stages';
 import type { EvalOptions, PrefillEvaluation, SimInput } from '../../surface/api';
 import { runnableOn, validateInput } from './validate';
 import { runPipeline } from './common';
+import { memoryFootprint } from './memory';
 
 export function evaluatePrefill<TBackend extends CostBackend>(
   input: SimInput,
@@ -16,7 +18,11 @@ export function evaluatePrefill<TBackend extends CostBackend>(
   const T = workload.prefillLen;
 
   const diags = validateInput(input);
-  if (diags.some((x) => x.severity === 'error')) return { ok: false, diags };
+  const fail = (extra?: Diagnostic): PrefillEvaluation<TBackend> => ({
+    ok: false,
+    diags: extra ? [...diags, extra] : diags,
+  });
+  if (diags.some((x) => x.severity === 'error')) return fail();
 
   // validate saw the model as written; lower the model as this chip runs it
   const model = runnableOn(input.model, deployment.chip);
@@ -25,6 +31,16 @@ export function evaluatePrefill<TBackend extends CostBackend>(
   const pp = roleSize(deployment.mesh, 'PP');
 
   const stages = partitionIntoStages(model, pp);
+  const memory = memoryFootprint(model, deployment, stages, T);
+  // Throughput keeps one microbatch on every pipeline stage. TTFT runs
+  // one request through the stages in sequence, so it has no PP multiplier.
+  const residentSeqsPerChip = mode === 'throughput' ? (seqs / dpa) * pp : seqs;
+  if (!opts.ignoreKvCapacity && residentSeqsPerChip > memory.maxResidentSeqsPerChip)
+    return fail({
+      severity: 'error',
+      code: 'kv-no-room',
+      message: `${residentSeqsPerChip} resident sequences per chip exceed the ${memory.maxResidentSeqsPerChip} that fit in KV`,
+    });
 
   const run = runPipeline(input, stages, opts, (stage) =>
     lowerStage(
