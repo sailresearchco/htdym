@@ -254,6 +254,59 @@ test('thin GEMM dims pay tile padding', () => {
   expect(time(256, 128, 128) / full).toBeCloseTo(2, 9);
 });
 
+test('a grouped GEMM pads each group to the cheapest MMA instruction', () => {
+  const time = (chip: ChipSpec, groups: number) =>
+    naiveOpCost(
+      {
+        kind: 'gemm',
+        id: 'g' as OpId,
+        label: 'g',
+        deps: [],
+        x: tt([256, 128]),
+        w: tt([groups, 128, 128]),
+        out: tt([256, 128]),
+        dtype: 'bf16',
+        groups,
+      },
+      singleChip(chip),
+    ).compute;
+  // 256 rows over 111 groups (gpt-oss-120b top-4 at 64 tokens): Hopper
+  // pays one m16 mma.sync at 2/3 rate per group, not a 128-row tile
+  expect(time(h100, 111) / time(h100, 1)).toBeCloseTo((111 * 16) / 0.67 / 256, 9);
+  // Blackwell's m64 half-datapath shape is no cheaper than its m128
+  expect(time(CHIPS_BY_ID['b200'], 111) / time(CHIPS_BY_ID['b200'], 1)).toBeCloseTo(
+    (111 * 128) / 256,
+    9,
+  );
+  // without mmaShapes every group pays a saturating matmulSatRows tile
+  const noShapes: ChipSpec = { ...h100, mmaShapes: undefined };
+  expect(time(noShapes, 111) / time(noShapes, 1)).toBeCloseTo((111 * 128) / 256, 9);
+});
+
+test('gpt-oss-120b decode on one H200 stays under the measured step time', () => {
+  // InferenceX gptoss-fp4-h200-trt, TP=1, 1k/1k, concurrency 64: median
+  // TPOT 22.5 ms (github.com/SemiAnalysisAI/InferenceX, run 26016892349)
+  const measured = 22.5e-3;
+  const model = MODEL_PRESETS.find((m) => m.name === 'gpt-oss-120b MXFP4/BF16')!;
+  const h200 = CHIPS_BY_ID['h200-sxm'];
+  const step = (chip: ChipSpec) => {
+    const r = evaluateDecodeAtBatch(
+      { model, deployment: singleChip(chip), workload: { prefillLen: 1024, generateLen: 1024 } },
+      64,
+      1,
+      { costBackend: makeNaiveOpCostSumBackend({ memoryOverlap: 0.9, commsOverlap: 0.65 }) },
+    );
+    if (!r.ok) throw new Error(r.diags.map((x) => x.message).join(', '));
+    return r;
+  };
+  const fixed = step(h200);
+  expect(fixed.stepTime).toBeLessThan(measured);
+  expect(fixed.cost.busy.memory).toBeGreaterThan(fixed.cost.busy.compute);
+  // padding every expert to matmulSatRows made the same step compute-bound
+  // and slower than the engine
+  expect(step({ ...h200, mmaShapes: undefined }).stepTime).toBeGreaterThan(measured);
+});
+
 test('a gemm charges its activation streams to memory', () => {
   const ctx = singleChip(h100);
   const [m, k, n] = [256, 512, 1024];

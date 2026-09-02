@@ -1,7 +1,7 @@
 import { collectiveCost } from './collectives';
 import { ExpandedOp } from '../../ir/ops';
 import { localElems, shardWays } from '../../ir/tensors';
-import { DEFAULT_MATMUL_SAT_ROWS, peakFlops } from '../../../../hardware/chips';
+import { DEFAULT_MATMUL_SAT_ROWS, groupPadRows, peakFlops } from '../../../../hardware/chips';
 import type { HardwareResource } from '../../../surface/api';
 import type { Deployment } from '../../../surface/deploy';
 import { DTYPE_BYTES, type Dtype } from '../../../../model/dtype';
@@ -14,13 +14,21 @@ export type OpCost = Record<HardwareResource, number>;
 // slicing a projection) idles the array's columns or depth exactly like
 // a short M idles its rows. Grouped GEMMs pad rows per activated group
 // (multinomial token counts smooth the per-group ceiling, keep the
-// floor: every activated group pads to one tile).
-function tileUtil(m: number, n: number, k: number, groups: number, tile: number): number {
+// floor: every activated group pays `groupRows`, the chip's cheapest
+// single MMA instruction, see ChipSpec.mmaShapes).
+function tileUtil(
+  m: number,
+  n: number,
+  k: number,
+  groups: number,
+  tile: number,
+  groupRows: number,
+): number {
   // tile 1 = no tiling at all (fractional dims, e.g. MLA's equivalent
   // columns, must not round)
   if (tile <= 1 || m <= 0 || n <= 0 || k <= 0) return 1;
   const pad = (d: number) => tile * Math.ceil(d / tile);
-  const rows = groups <= 1 ? pad(m) : Math.max(m, groups * tile);
+  const rows = groups <= 1 ? pad(m) : Math.max(m, groups * groupRows);
   return (m * n * k) / (rows * pad(n) * pad(k));
 }
 
@@ -47,6 +55,7 @@ export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
         kLocal,
         op.groups ?? 1,
         chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS,
+        groupPadRows(chip),
       );
       return {
         compute: (2 * mLocal * kLocal * nLocal) / (rate(op.dtype) * util),
