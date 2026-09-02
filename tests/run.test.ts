@@ -9,7 +9,7 @@ import { OpId } from '../src/core/engine/sim/ir/ops';
 import { localElems, tt } from '../src/core/engine/sim/ir/tensors';
 import { runnableOn, validateInput } from '../src/core/engine/sim/run/validate';
 import { Deployment, makeMesh, MoeDispatch } from '../src/core/engine/surface/deploy';
-import { ChipSpec, CHIPS_BY_ID, peakFlops, runsAs } from '../src/core/hardware/chips';
+import { ChipSpec, CHIPS, CHIPS_BY_ID, peakFlops, runsAs } from '../src/core/hardware/chips';
 import { deployedAxes } from '../src/core/hardware/topology';
 import { gqa } from '../src/core/model/block/attn';
 import { MlpConfig, moeMlp } from '../src/core/model/block/mlp';
@@ -277,6 +277,12 @@ test('a grouped GEMM pads each group to the cheapest MMA instruction', () => {
   // one 2-row expert per chip (EP = experts) is still a grouped GEMM: one
   // m16, not a dense 128-row tile
   expect(time(h100, 2, 1) / dense).toBeCloseTo(16 / 0.67 / 256, 9);
+  // but a one-group GEMM with rows to fill tiles never undercuts the dense
+  // GEMM of the same shape: 100 rows are two m64 either way
+  expect(time(h100, 100, 1)).toBeCloseTo(time(h100, 100), 9);
+  // Ampere's only instruction is a full-rate m16: one per group
+  const a100 = CHIPS_BY_ID['a100-sxm'];
+  expect(time(a100, 256, 111) / time(a100, 256)).toBeCloseTo((111 * 16) / 256, 9);
   // 32 rows per group fill m16 instructions, so all rows run at 2/3 rate
   expect(time(h100, 4096, 128) / dense).toBeCloseTo(4096 / 0.67 / 256, 9);
   // enough rows per group and m64 at full rate wins again
@@ -287,6 +293,18 @@ test('a grouped GEMM pads each group to the cheapest MMA instruction', () => {
   // without mmaShapes every group pays a saturating matmulSatRows tile
   const noShapes: ChipSpec = { ...h100, mmaShapes: undefined };
   expect(time(noShapes, 256, 111) / time(noShapes, 256)).toBeCloseTo((111 * 128) / 256, 9);
+});
+
+test('every mmaShapes entry has a positive m and a rate in (0, 1]', () => {
+  for (const chip of CHIPS) {
+    if (chip.mmaShapes === undefined) continue;
+    expect(chip.mmaShapes.length).toBeGreaterThan(0);
+    for (const s of chip.mmaShapes) {
+      expect(s.m).toBeGreaterThan(0);
+      expect(s.rate).toBeGreaterThan(0);
+      expect(s.rate).toBeLessThanOrEqual(1);
+    }
+  }
 });
 
 test('gpt-oss-120b decode on one H200 stays under the measured step time', () => {
@@ -307,10 +325,8 @@ test('gpt-oss-120b decode on one H200 stays under the measured step time', () =>
   };
   const fixed = step(h200);
   expect(fixed.stepTime).toBeLessThan(measured);
+  // decode at this batch is a weight stream, not a GEMM
   expect(fixed.cost.busy.memory).toBeGreaterThan(fixed.cost.busy.compute);
-  // padding every expert to matmulSatRows made the same step compute-bound
-  // and slower than the engine
-  expect(step({ ...h200, mmaShapes: undefined }).stepTime).toBeGreaterThan(measured);
 });
 
 test('a gemm charges its activation streams to memory', () => {

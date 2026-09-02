@@ -35,22 +35,26 @@ export interface ChipSpec {
   tdp?: number;
   // Fraction of the datasheet matmul rate a well-tuned, well-shaped GEMM
   // sustains (sustained clocks, kernel quality). Derates compute pricing
-  // only; shape-dependent padding is priced separately via matmulSatRows.
+  // only; shape-dependent padding is priced separately via matmulSatRows
+  // and mmaShapes.
   realizableFlopsFrac: number;
   // Fraction of hbmBandwidth a well-tuned streaming kernel sustains;
   // derates every memory price.
   realizableHbmBwFrac: number;
   // Edge of the matmul array's tile: every GEMM dim (M, N and K) pads up
   // to it, so thin shards run at padded-volume utilization (a 64-deep
-  // contraction on a 128x128 MXU idles half the array).
+  // contraction on a 128x128 MXU idles half the array). A grouped GEMM's
+  // rows pad to mmaShapes instead (its N and K still pad here).
   // DEFAULT_MATMUL_SAT_ROWS = 128, since TPU MXUs are 128x128 and
   // H100-class GEMMs want >=128-row tiles.
   matmulSatRows?: number;
-  // Row (M) shapes of the chip's matmul instructions and the fraction of
-  // peak each sustains. A grouped GEMM (MoE experts) runs on the shape
-  // that is cheapest for its rows, padding every activated group to that
-  // shape rather than to a saturating matmulSatRows tile: a 2-token expert
-  // costs one m16 mma.sync on Hopper, not 128 rows.
+  // Row (M) shapes of the chip's matmul instructions and the throughput
+  // each sustains relative to the chip's full-rate shape (it stacks on
+  // realizableFlopsFrac, so enter mma.sync/wgmma, not mma.sync/peak). A
+  // grouped GEMM (MoE experts) runs on the shape that is cheapest for its
+  // rows, padding every activated group to that shape rather than to a
+  // saturating matmulSatRows tile: a 2-token expert costs one m16
+  // mma.sync on Hopper, not 128 rows.
   // Omitted = a single full-rate matmulSatRows shape.
   mmaShapes?: { m: number; rate: number }[];
 }
@@ -59,11 +63,13 @@ export interface ChipSpec {
 export const DEFAULT_MATMUL_SAT_ROWS = 128;
 
 // Full-rate row equivalents a grouped GEMM of m rows over `groups` activated
-// groups pays: every group issues at least one instruction and every row
-// runs at that instruction's rate, on whichever shape makes that cheapest.
+// groups pays: every group issues at least one instruction (the floor), the
+// rows still come in whole instructions (the ceiling, at the shape's own
+// granularity, so a one-group GEMM never undercuts the dense path) and every
+// row runs at that instruction's rate, on whichever shape makes that cheapest.
 export function groupedRows(chip: ChipSpec, m: number, groups: number): number {
   const shapes = chip.mmaShapes ?? [{ m: chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS, rate: 1 }];
-  return Math.min(...shapes.map((s) => Math.max(m, groups * s.m) / s.rate));
+  return Math.min(...shapes.map((s) => Math.max(s.m * Math.ceil(m / s.m), groups * s.m) / s.rate));
 }
 
 // What a format degrades to when a chip has no matmul unit for it: each names
@@ -150,6 +156,8 @@ export const CHIPS: ChipSpec[] = [
       scaleOut: { bandwidthPerChip: 25e9, latency: 5e-6, maxNodes: 8 },
     },
     // measured: MAMF 271/312 TF bf16; BabelStream 1.73/2.04 TB/s
+    // mma.sync m16n8k16 is Ampere's only tensor-core path, at full rate
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.85,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.81,
@@ -393,6 +401,8 @@ export const CHIPS: ChipSpec[] = [
     },
     // measured: cuBLAS 386/504 TF bf16 (ungated part); GDDR7 fraction inferred
     // from the 5090's subsystem
+    // sm_120 has no tcgen05/wgmma: mma.sync m16 is its full-rate instruction
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 1.26,
@@ -428,6 +438,8 @@ export const CHIPS: ChipSpec[] = [
     },
     // GeForce datasheet tensor rates already carry the fp32-accumulate gate, so
     // tuned GEMMs land at ~1.0x datasheet; streaming reads 1.67/1.79 TB/s
+    // sm_120 has no tcgen05/wgmma: mma.sync m16 is its full-rate instruction
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.95,
     costPerHour: 0.54,
@@ -460,6 +472,8 @@ export const CHIPS: ChipSpec[] = [
       scaleOut: { bandwidthPerChip: 12.5e9, latency: 10e-6, maxNodes: 8 },
     },
     // gated datasheet as above: fp32-acc GEMMs ~1.0x datasheet; streaming ~0.9
+    // Ada, like Ampere: mma.sync m16 is the only tensor-core path, full rate
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.9,
     costPerHour: 0.36,
