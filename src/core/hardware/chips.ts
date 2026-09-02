@@ -47,9 +47,10 @@ export interface ChipSpec {
   // H100-class GEMMs want >=128-row tiles.
   matmulSatRows?: number;
   // Row (M) shapes of the chip's matmul instructions and the fraction of
-  // peak each sustains. A grouped GEMM (MoE experts) pads every activated
-  // group to the cheapest one rather than to a saturating matmulSatRows
-  // tile: a 2-token expert costs one m16 mma.sync on Hopper, not 128 rows.
+  // peak each sustains. A grouped GEMM (MoE experts) runs on the shape
+  // that is cheapest for its rows, padding every activated group to that
+  // shape rather than to a saturating matmulSatRows tile: a 2-token expert
+  // costs one m16 mma.sync on Hopper, not 128 rows.
   // Omitted = a single full-rate matmulSatRows shape.
   mmaShapes?: { m: number; rate: number }[];
 }
@@ -57,10 +58,12 @@ export interface ChipSpec {
 // Fallback ChipSpec.matmulSatRows, see that field's doc.
 export const DEFAULT_MATMUL_SAT_ROWS = 128;
 
-// Full-rate row equivalents one activated group of a grouped GEMM pays.
-export function groupPadRows(chip: ChipSpec): number {
+// Full-rate row equivalents a grouped GEMM of m rows over `groups` activated
+// groups pays: every group issues at least one instruction and every row
+// runs at that instruction's rate, on whichever shape makes that cheapest.
+export function groupedRows(chip: ChipSpec, m: number, groups: number): number {
   const shapes = chip.mmaShapes ?? [{ m: chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS, rate: 1 }];
-  return Math.min(...shapes.map((s) => s.m / s.rate));
+  return Math.min(...shapes.map((s) => Math.max(m, groups * s.m) / s.rate));
 }
 
 // What a format degrades to when a chip has no matmul unit for it: each names

@@ -255,32 +255,38 @@ test('thin GEMM dims pay tile padding', () => {
 });
 
 test('a grouped GEMM pads each group to the cheapest MMA instruction', () => {
-  const time = (chip: ChipSpec, groups: number) =>
+  const time = (chip: ChipSpec, m: number, groups?: number) =>
     naiveOpCost(
       {
         kind: 'gemm',
         id: 'g' as OpId,
         label: 'g',
         deps: [],
-        x: tt([256, 128]),
-        w: tt([groups, 128, 128]),
-        out: tt([256, 128]),
+        x: tt([m, 128]),
+        w: tt(groups === undefined ? [128, 128] : [groups, 128, 128]),
+        out: tt([m, 128]),
         dtype: 'bf16',
         groups,
       },
       singleChip(chip),
     ).compute;
+  const dense = time(h100, 256);
   // 256 rows over 111 groups (gpt-oss-120b top-4 at 64 tokens): Hopper
   // pays one m16 mma.sync at 2/3 rate per group, not a 128-row tile
-  expect(time(h100, 111) / time(h100, 1)).toBeCloseTo((111 * 16) / 0.67 / 256, 9);
+  expect(time(h100, 256, 111) / dense).toBeCloseTo((111 * 16) / 0.67 / 256, 9);
+  // one 2-row expert per chip (EP = experts) is still a grouped GEMM: one
+  // m16, not a dense 128-row tile
+  expect(time(h100, 2, 1) / dense).toBeCloseTo(16 / 0.67 / 256, 9);
+  // 32 rows per group fill m16 instructions, so all rows run at 2/3 rate
+  expect(time(h100, 4096, 128) / dense).toBeCloseTo(4096 / 0.67 / 256, 9);
+  // enough rows per group and m64 at full rate wins again
+  expect(time(h100, 8192, 128) / dense).toBeCloseTo(8192 / 256, 9);
   // Blackwell's m64 half-datapath shape is no cheaper than its m128
-  expect(time(CHIPS_BY_ID['b200'], 111) / time(CHIPS_BY_ID['b200'], 1)).toBeCloseTo(
-    (111 * 128) / 256,
-    9,
-  );
+  const b200 = CHIPS_BY_ID['b200'];
+  expect(time(b200, 256, 111) / time(b200, 256)).toBeCloseTo((111 * 128) / 256, 9);
   // without mmaShapes every group pays a saturating matmulSatRows tile
   const noShapes: ChipSpec = { ...h100, mmaShapes: undefined };
-  expect(time(noShapes, 111) / time(noShapes, 1)).toBeCloseTo((111 * 128) / 256, 9);
+  expect(time(noShapes, 256, 111) / time(noShapes, 256)).toBeCloseTo((111 * 128) / 256, 9);
 });
 
 test('gpt-oss-120b decode on one H200 stays under the measured step time', () => {
