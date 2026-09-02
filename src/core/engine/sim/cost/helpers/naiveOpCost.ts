@@ -1,7 +1,12 @@
 import { collectiveCost } from './collectives';
 import { ExpandedOp } from '../../ir/ops';
 import { localElems, shardWays } from '../../ir/tensors';
-import { DEFAULT_MATMUL_SAT_ROWS, peakFlops } from '../../../../hardware/chips';
+import {
+  type ChipSpec,
+  DEFAULT_MATMUL_SAT_ROWS,
+  groupedRows,
+  peakFlops,
+} from '../../../../hardware/chips';
 import type { HardwareResource } from '../../../surface/api';
 import type { Deployment } from '../../../surface/deploy';
 import { DTYPE_BYTES, type Dtype } from '../../../../model/dtype';
@@ -12,15 +17,23 @@ export type OpCost = Record<HardwareResource, number>;
 // every edge (a 128x128 MXU, 128-row tensor-core macro-tiles), so all
 // three GEMM dims pad up to it. A thin N or K shard (deep TP/ETP
 // slicing a projection) idles the array's columns or depth exactly like
-// a short M idles its rows. Grouped GEMMs pad rows per activated group
-// (multinomial token counts smooth the per-group ceiling, keep the
-// floor: every activated group pads to one tile).
-function tileUtil(m: number, n: number, k: number, groups: number, tile: number): number {
+// a short M idles its rows. Grouped GEMMs (groups defined, even if 1)
+// pad rows per activated group instead (multinomial token counts smooth
+// the per-group ceiling, keep the floor: every activated group pays at
+// least one MMA instruction, see groupedRows).
+function tileUtil(
+  chip: ChipSpec,
+  m: number,
+  n: number,
+  k: number,
+  groups: number | undefined,
+): number {
+  const tile = chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS;
   // tile 1 = no tiling at all (fractional dims, e.g. MLA's equivalent
   // columns, must not round)
   if (tile <= 1 || m <= 0 || n <= 0 || k <= 0) return 1;
   const pad = (d: number) => tile * Math.ceil(d / tile);
-  const rows = groups <= 1 ? pad(m) : Math.max(m, groups * tile);
+  const rows = groups === undefined ? pad(m) : groupedRows(chip, m, groups);
   return (m * n * k) / (rows * pad(n) * pad(k));
 }
 
@@ -41,13 +54,7 @@ export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
       const mLocal = m / shardWays(op.x.sharding[0], dims);
       const kLocal = k / shardWays(op.x.sharding[1], dims);
       const nLocal = op.w.shape[last] / shardWays(op.w.sharding[last], dims);
-      const util = tileUtil(
-        mLocal,
-        nLocal,
-        kLocal,
-        op.groups ?? 1,
-        chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS,
-      );
+      const util = tileUtil(chip, mLocal, nLocal, kLocal, op.groups);
       return {
         compute: (2 * mLocal * kLocal * nLocal) / (rate(op.dtype) * util),
         memory: (mLocal * (kLocal + nLocal) * DTYPE_BYTES[op.dtype]) / hbm,

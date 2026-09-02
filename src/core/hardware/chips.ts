@@ -35,21 +35,42 @@ export interface ChipSpec {
   tdp?: number;
   // Fraction of the datasheet matmul rate a well-tuned, well-shaped GEMM
   // sustains (sustained clocks, kernel quality). Derates compute pricing
-  // only; shape-dependent padding is priced separately via matmulSatRows.
+  // only; shape-dependent padding is priced separately via matmulSatRows
+  // and mmaShapes.
   realizableFlopsFrac: number;
   // Fraction of hbmBandwidth a well-tuned streaming kernel sustains;
   // derates every memory price.
   realizableHbmBwFrac: number;
   // Edge of the matmul array's tile: every GEMM dim (M, N and K) pads up
   // to it, so thin shards run at padded-volume utilization (a 64-deep
-  // contraction on a 128x128 MXU idles half the array).
+  // contraction on a 128x128 MXU idles half the array). A grouped GEMM's
+  // rows pad to mmaShapes instead (its N and K still pad here).
   // DEFAULT_MATMUL_SAT_ROWS = 128, since TPU MXUs are 128x128 and
   // H100-class GEMMs want >=128-row tiles.
   matmulSatRows?: number;
+  // Row (M) shapes of the chip's matmul instructions and the throughput
+  // each sustains relative to the chip's full-rate shape (it stacks on
+  // realizableFlopsFrac, so enter mma.sync/wgmma, not mma.sync/peak). A
+  // grouped GEMM (MoE experts) runs on the shape that is cheapest for its
+  // rows, padding every activated group to that shape rather than to a
+  // saturating matmulSatRows tile: a 2-token expert costs one m16
+  // mma.sync on Hopper, not 128 rows.
+  // Omitted = a single full-rate matmulSatRows shape.
+  mmaShapes?: { m: number; rate: number }[];
 }
 
 // Fallback ChipSpec.matmulSatRows, see that field's doc.
 export const DEFAULT_MATMUL_SAT_ROWS = 128;
+
+// Full-rate row equivalents a grouped GEMM of m rows over `groups` activated
+// groups pays: every group issues at least one instruction (the floor), the
+// rows still come in whole instructions (the ceiling, at the shape's own
+// granularity, so a one-group GEMM never undercuts the dense path) and every
+// row runs at that instruction's rate, on whichever shape makes that cheapest.
+export function groupedRows(chip: ChipSpec, m: number, groups: number): number {
+  const shapes = chip.mmaShapes ?? [{ m: chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS, rate: 1 }];
+  return Math.min(...shapes.map((s) => Math.max(s.m * Math.ceil(m / s.m), groups * s.m) / s.rate));
+}
 
 // What a format degrades to when a chip has no matmul unit for it: each names
 // the next format its data can be unpacked into, and following the chain gives
@@ -135,6 +156,8 @@ export const CHIPS: ChipSpec[] = [
       scaleOut: { bandwidthPerChip: 25e9, latency: 5e-6, maxNodes: 8 },
     },
     // measured: MAMF 271/312 TF bf16; BabelStream 1.73/2.04 TB/s
+    // mma.sync m16n8k16 is Ampere's only tensor-core path, at full rate
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.85,
     realizableHbmBwFrac: 0.85,
     costPerHour: 0.81,
@@ -167,6 +190,12 @@ export const CHIPS: ChipSpec[] = [
     },
     // measured: sustained GEMM ~720-794/989 TF bf16, fp8 fraction lower
     // (SemiAnalysis/MAMF); BabelStream copy/triad ~0.9
+    // wgmma m64 at full rate; legacy mma.sync m16 sustains ~2/3 of peak
+    // (Luo et al. 2024, arXiv:2402.13499, measured ~63-67% on H800)
+    mmaShapes: [
+      { m: 64, rate: 1 },
+      { m: 16, rate: 0.67 },
+    ],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 1.8,
@@ -197,6 +226,10 @@ export const CHIPS: ChipSpec[] = [
       scaleOut: { bandwidthPerChip: 50e9, latency: 5e-6, maxNodes: 8 },
     },
     // same GH100 silicon: sustained GEMM as H100; copy kernels ~0.85-0.9
+    mmaShapes: [
+      { m: 64, rate: 1 },
+      { m: 16, rate: 0.67 },
+    ],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 2.25,
@@ -228,6 +261,12 @@ export const CHIPS: ChipSpec[] = [
     },
     // measured: MAMF 1745/2250 TF bf16, fp8 ~0.76; copy kernels 6.6-7 TB/s
     // and improving with drivers
+    // tcgen05.mma M=128 fills the datapath; M=64 drives half of it (PTX ISA,
+    // tcgen05 data-path layouts), so a small group pays a full 128 either way
+    mmaShapes: [
+      { m: 128, rate: 1 },
+      { m: 64, rate: 0.5 },
+    ],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 3.6,
@@ -256,6 +295,10 @@ export const CHIPS: ChipSpec[] = [
     // head count divides by, leaving those chips with no role to fill.
     interconnect: { bandwidthPerChip: 900e9, latency: 2e-6, domainSize: 64 },
     // B200 silicon at a higher datasheet clock: MAMF 1822/2500, same HBM
+    mmaShapes: [
+      { m: 128, rate: 1 },
+      { m: 64, rate: 0.5 },
+    ],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 4.5,
@@ -294,6 +337,10 @@ export const CHIPS: ChipSpec[] = [
       domainSize: 8,
       scaleOut: { bandwidthPerChip: 100e9, latency: 5e-6, maxNodes: 8 },
     },
+    mmaShapes: [
+      { m: 128, rate: 1 },
+      { m: 64, rate: 0.5 },
+    ],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.85,
     costPerHour: 5.4,
@@ -354,6 +401,8 @@ export const CHIPS: ChipSpec[] = [
     },
     // measured: cuBLAS 386/504 TF bf16 (ungated part); GDDR7 fraction inferred
     // from the 5090's subsystem
+    // sm_120 has no tcgen05/wgmma: mma.sync m16 is its full-rate instruction
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.75,
     realizableHbmBwFrac: 0.9,
     costPerHour: 1.26,
@@ -389,6 +438,8 @@ export const CHIPS: ChipSpec[] = [
     },
     // GeForce datasheet tensor rates already carry the fp32-accumulate gate, so
     // tuned GEMMs land at ~1.0x datasheet; streaming reads 1.67/1.79 TB/s
+    // sm_120 has no tcgen05/wgmma: mma.sync m16 is its full-rate instruction
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.95,
     costPerHour: 0.54,
@@ -421,6 +472,8 @@ export const CHIPS: ChipSpec[] = [
       scaleOut: { bandwidthPerChip: 12.5e9, latency: 10e-6, maxNodes: 8 },
     },
     // gated datasheet as above: fp32-acc GEMMs ~1.0x datasheet; streaming ~0.9
+    // Ada, like Ampere: mma.sync m16 is the only tensor-core path, full rate
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.95,
     realizableHbmBwFrac: 0.9,
     costPerHour: 0.36,
@@ -453,6 +506,8 @@ export const CHIPS: ChipSpec[] = [
     // sustained clock ~1.2 of the 2.1 GHz boost the datasheet assumes: tuned
     // GEMMs 620-708/1307 TF bf16 (SemiAnalysis/AMD MAF); BabelStream
     // 3.9-4.3/5.3 TB/s
+    // MFMA 16x16xK is a full-rate instruction on CDNA3/CDNA4
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.5,
     realizableHbmBwFrac: 0.8,
     costPerHour: 2.16,
@@ -481,6 +536,7 @@ export const CHIPS: ChipSpec[] = [
     },
     // same silicon at 1000 W sustains higher clocks: AMD MAF 843/1307 TF; HBM
     // fraction inferred from MI300X
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.6,
     realizableHbmBwFrac: 0.8,
     costPerHour: 2.7,
@@ -512,6 +568,7 @@ export const CHIPS: ChipSpec[] = [
     },
     // measured: HipKittens ~1610/2500 TF bf16, fp8 ~0.65; streaming reads
     // ~5.8/8 TB/s
+    mmaShapes: [{ m: 16, rate: 1 }],
     realizableFlopsFrac: 0.65,
     realizableHbmBwFrac: 0.7,
     costPerHour: 3.6,
