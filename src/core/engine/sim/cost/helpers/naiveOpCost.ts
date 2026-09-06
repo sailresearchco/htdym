@@ -1,27 +1,35 @@
 import { collectiveCost } from './collectives';
 import { ExpandedOp } from '../../ir/ops';
 import { localElems, shardWays } from '../../ir/tensors';
-import { DEFAULT_MATMUL_SAT_ROWS, peakFlops } from '../../../../hardware/chips';
+import { peakFlops } from '../../../../hardware/chips';
+import type { MmaShape } from '../../../../hardware/mma';
 import type { HardwareResource } from '../../../surface/api';
 import type { Deployment } from '../../../surface/deploy';
 import { DTYPE_BYTES, type Dtype } from '../../../../model/dtype';
 
 export type OpCost = Record<HardwareResource, number>;
 
-// Padded-tile utilization: the matmul array's tile is `tile` wide on
-// every edge (a 128x128 MXU, 128-row tensor-core macro-tiles), so all
-// three GEMM dims pad up to it. A thin N or K shard (deep TP/ETP
-// slicing a projection) idles the array's columns or depth exactly like
-// a short M idles its rows. Grouped GEMMs pad rows per activated group
-// (multinomial token counts smooth the per-group ceiling, keep the
-// floor: every activated group pads to one tile).
-function tileUtil(m: number, n: number, k: number, groups: number, tile: number): number {
-  // tile 1 = no tiling at all (fractional dims, e.g. MLA's equivalent
-  // columns, must not round)
-  if (tile <= 1 || m <= 0 || n <= 0 || k <= 0) return 1;
-  const pad = (d: number) => tile * Math.ceil(d / tile);
-  const rows = groups <= 1 ? pad(m) : Math.max(m, groups * tile);
-  return (m * n * k) / (rows * pad(n) * pad(k));
+// Padded work divided by the path's relative rate, expressed as equivalent FLOPs
+// at full rate. The caller divides by the chip's sustained FLOP/s to get seconds.
+function adjustedFlops(
+  shapes: readonly MmaShape[],
+  m: number,
+  n: number,
+  k: number,
+  groups = 1,
+): number {
+  if (m <= 0 || n <= 0 || k <= 0) return 0;
+  // Unit tiles disable padding, including for fractional analytical shapes.
+  const pad = (d: number, tile: number) => (tile <= 1 ? d : tile * Math.ceil(d / tile));
+  return Math.min(
+    ...shapes.map((s) => {
+      // M counts total rows across groups. Round that total, then require at least
+      // one tile per active group. Individual group sizes are unknown, so this
+      // can miss partial-tile waste. One group is identical to a dense GEMM.
+      const rows = s.m <= 1 ? m : Math.max(pad(m, s.m), groups * s.m);
+      return (2 * rows * pad(n, s.n) * pad(k, s.k)) / s.rate;
+    }),
+  );
 }
 
 export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
@@ -30,8 +38,8 @@ export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
 
   const zero: OpCost = { compute: 0, memory: 0, comms: 0 };
 
-  // the ! holds because runnableOn resolved every op dtype to a unit this chip has
-  const rate = (d: Dtype) => peakFlops(chip, d)! * chip.realizableFlopsFrac;
+  // The ! holds because runnableOn resolved every op dtype to a unit this chip has.
+  const flopsPerSecond = (d: Dtype) => peakFlops(chip, d)! * chip.realizableFlopsFrac;
   const hbm = chip.hbmBandwidth * chip.realizableHbmBwFrac;
 
   switch (op.kind) {
@@ -41,22 +49,17 @@ export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
       const mLocal = m / shardWays(op.x.sharding[0], dims);
       const kLocal = k / shardWays(op.x.sharding[1], dims);
       const nLocal = op.w.shape[last] / shardWays(op.w.sharding[last], dims);
-      const util = tileUtil(
-        mLocal,
-        nLocal,
-        kLocal,
-        op.groups ?? 1,
-        chip.matmulSatRows ?? DEFAULT_MATMUL_SAT_ROWS,
-      );
       return {
-        compute: (2 * mLocal * kLocal * nLocal) / (rate(op.dtype) * util),
+        compute:
+          adjustedFlops(chip.mmaShapes[op.dtype], mLocal, nLocal, kLocal, op.groups) /
+          flopsPerSecond(op.dtype),
         memory: (mLocal * (kLocal + nLocal) * DTYPE_BYTES[op.dtype]) / hbm,
         comms: 0,
       };
     }
     case 'attention':
       return {
-        compute: op.flops / rate(op.dtype),
+        compute: op.flops / flopsPerSecond(op.dtype),
         memory: (op.kvReadBytes + op.kvWriteBytes) / hbm,
         comms: 0,
       };

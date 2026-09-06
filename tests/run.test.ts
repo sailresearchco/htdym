@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { IDEAL_MMA } from './fixtures';
 import { evaluatePrefill } from '../src/core/engine/sim/run/prefill';
 import { evaluateDecodeAtBatch } from '../src/core/engine/sim/run/decode';
 import { memoryFootprint } from '../src/core/engine/sim/run/memory';
@@ -9,11 +10,19 @@ import { OpId } from '../src/core/engine/sim/ir/ops';
 import { localElems, tt } from '../src/core/engine/sim/ir/tensors';
 import { runnableOn, validateInput } from '../src/core/engine/sim/run/validate';
 import { Deployment, makeMesh, MoeDispatch } from '../src/core/engine/surface/deploy';
-import { ChipSpec, CHIPS_BY_ID, peakFlops, runsAs } from '../src/core/hardware/chips';
+import { ChipSpec, CHIPS, CHIPS_BY_ID, peakFlops, runsAs } from '../src/core/hardware/chips';
 import { deployedAxes } from '../src/core/hardware/topology';
 import { gqa } from '../src/core/model/block/attn';
 import { MlpConfig, moeMlp } from '../src/core/model/block/mlp';
-import { ALL_BF16, BF16_ALL, DTYPE_BYTES, FP8_ALL, PrecisionSpec } from '../src/core/model/dtype';
+import {
+  ALL_BF16,
+  BF16_ALL,
+  DTYPES,
+  DTYPE_BYTES,
+  FP8_ALL,
+  PrecisionSpec,
+  type Dtype,
+} from '../src/core/model/dtype';
 import { ModelSpec, MODEL_PRESETS } from '../src/core/model/models';
 import { flopsPerPrefillToken, kvBytesPerSeq, weightBytesTotal } from '../src/core/model/utils';
 import { matmulSeconds } from '../src/core/engine/roofline';
@@ -21,9 +30,7 @@ import { matmulSeconds } from '../src/core/engine/roofline';
 const backend = makeNaiveOpCostSumBackend({ memoryOverlap: 0, commsOverlap: 0 });
 const h100 = CHIPS_BY_ID['h100-sxm'];
 const hbm = h100.hbmBandwidth * h100.realizableHbmBwFrac;
-// 1x1 matmul tiles: the closed-form tests check FLOP conservation, so
-// tile-padding utilization is priced out (and pinned separately below)
-const idealTiles: typeof h100 = { ...h100, matmulSatRows: 1 };
+const idealTiles: ChipSpec = { ...h100, mmaShapes: IDEAL_MMA };
 
 test('validateInput gates weights past HBM capacity', () => {
   const kimi = MODEL_PRESETS.find((m) => m.name.startsWith('Kimi K2.6'))!;
@@ -263,48 +270,252 @@ test('single-chip dense prefill memory matches weights plus KV writes', () => {
   expect((r.cost.busy.memory - acts / hbm) / (bytes / hbm)).toBeCloseTo(1, 6);
 });
 
-test('thin GEMM dims pay tile padding', () => {
-  const ctx = singleChip(h100);
-  const time = (m: number, k: number, n: number) =>
-    naiveOpCost(
-      {
-        kind: 'gemm',
-        id: 'g' as OpId,
-        label: 'g',
-        deps: [],
-        x: tt([m, k]),
-        w: tt([k, n]),
-        out: tt([m, n]),
-        dtype: 'bf16',
-      },
-      ctx,
-    ).compute;
-
-  // any dim below the 128 tile costs the same as the padded full tile
-  const full = time(128, 128, 128);
-  expect(time(64, 128, 128)).toBeCloseTo(full, 15);
-  expect(time(128, 64, 128)).toBeCloseTo(full, 15);
-  expect(time(128, 128, 64)).toBeCloseTo(full, 15);
-  // aligned shapes pay none: pure flops ratio
-  expect(time(256, 128, 128) / full).toBeCloseTo(2, 9);
-});
-
-test('a gemm charges its activation streams to memory', () => {
-  const ctx = singleChip(h100);
-  const [m, k, n] = [256, 512, 1024];
-  const cost = naiveOpCost(
+function gemmCost(
+  chip: ChipSpec,
+  m: number,
+  k = 128,
+  n = 128,
+  groups?: number,
+  dtype: Dtype = 'bf16',
+) {
+  return naiveOpCost(
     {
       kind: 'gemm',
       id: 'g' as OpId,
       label: 'g',
       deps: [],
       x: tt([m, k]),
-      w: tt([k, n]),
+      w: tt(groups === undefined ? [k, n] : [groups, k, n]),
       out: tt([m, n]),
-      dtype: 'bf16',
+      dtype,
+      groups,
     },
-    ctx,
+    singleChip(chip),
   );
+}
+
+test('dense GEMMs use the chip shapes for M, N and K', () => {
+  const time = (m: number, k: number, n: number) => gemmCost(h100, m, k, n).compute;
+  const full = time(128, 128, 128);
+  expect(time(64, 128, 128) / full).toBeCloseTo(0.5, 9);
+  expect(time(128, 64, 128) / full).toBeCloseTo(0.5, 9);
+  expect(time(128, 128, 64) / full).toBeCloseTo(0.5, 9);
+  expect(time(128, 8, 128)).toBe(time(128, 16, 128));
+  expect(time(8, 128, 128)).toBe(time(128, 128, 8));
+  expect(time(256, 128, 128) / full).toBeCloseTo(2, 9);
+});
+
+test('grouped GEMMs require at least one tile per active expert', () => {
+  const time = (chip: ChipSpec, m: number, groups?: number) =>
+    gemmCost(chip, m, 128, 128, groups).compute;
+  // 256 rows over 111 groups: swapped warp paths use eight-row tiles;
+  // Rubin currently models only wide instructions with 128-row output tiles.
+  for (const [id, rows, rate] of [
+    ['h100-sxm', 8, 0.67],
+    ['a100-sxm', 8, 1],
+    ['b200', 8, 0.25],
+    ['vr100-nvl72', 128, 1],
+  ] as const) {
+    const chip = CHIPS_BY_ID[id];
+    expect(time(chip, 256, 111) / time(chip, 256)).toBeCloseTo((111 * rows) / rate / 256, 9);
+  }
+  const dense = time(h100, 256);
+  expect(time(h100, 2, 1) / dense).toBeCloseTo(8 / 0.67 / 256, 9);
+  // Register-A/shared-B WGMMA reaches near-full throughput at 32 rows per group.
+  expect(time(h100, 4096, 128) / dense).toBeCloseTo(4096 / 256, 9);
+  expect(time(h100, 8192, 128) / dense).toBeCloseTo(8192 / 256, 9);
+});
+
+test('Blackwell small GEMMs trade padding against measured instruction rates', () => {
+  for (const id of ['b200', 'gb200-nvl72', 'b300']) {
+    const chip = CHIPS_BY_ID[id];
+    for (const dtype of ['bf16', 'fp8'] as const) {
+      const time = (m: number, n = 4096) => gemmCost(chip, m, 128, n, undefined, dtype).compute;
+      const full = time(128);
+      // Equivalent full-rate rows, including the slower small-instruction path.
+      for (const [m, bf16Rows, fp8Rows] of [
+        [1, 32, 64],
+        [8, 32, 64],
+        [16, 64, 80],
+        [32, 80, 80],
+        [64, 96, 96],
+      ]) {
+        expect(time(m) / full).toBeCloseTo((dtype === 'bf16' ? bf16Rows : fp8Rows) / 128, 12);
+        expect(time(m)).toBe(time(4096, m));
+      }
+      // Both output dimensions can be small; a wide tile or warp alone loses.
+      expect(time(64, 64) / time(128, 128)).toBeCloseTo(0.5, 12);
+      expect(time(64, 32) / time(128, 128)).toBeCloseTo(0.375, 12);
+    }
+  }
+});
+
+test('Blackwell block-scaled GEMMs use narrower N without assuming native M64', () => {
+  for (const id of ['b200', 'gb200-nvl72']) {
+    for (const dtype of ['mxfp8', 'fp4', 'mxfp4', 'nvfp4'] as const) {
+      const k = dtype === 'mxfp8' ? 32 : 64;
+      const time = (m: number, n = 4096, reduction = k) =>
+        gemmCost(CHIPS_BY_ID[id], m, reduction, n, undefined, dtype).compute;
+      expect(time(32) / time(128)).toBeCloseTo(80 / 128, 12);
+      expect(time(64) / time(128)).toBeCloseTo(96 / 128, 12);
+      expect(time(32)).toBe(time(4096, 32));
+      expect(time(64, 64) / time(128, 128)).toBeCloseTo(0.75, 12);
+      expect(time(128, 128, k / 2)).toBe(time(128, 128));
+      expect(time(128, 128, k + 1) / time(128, 128)).toBeCloseTo(2, 12);
+    }
+  }
+});
+
+test('B300 FP4 reaches its higher peak only with larger tiles', () => {
+  for (const dtype of ['fp4', 'mxfp4', 'nvfp4'] as const) {
+    const time = (id: string, m: number, k: number, n: number) =>
+      gemmCost(CHIPS_BY_ID[id], m, k, n, undefined, dtype).compute;
+    // Equal work below the larger tile still runs at B200's throughput.
+    expect(time('b300', 128, 192, 128) / time('b200', 128, 192, 128)).toBeCloseTo(1, 12);
+    expect(time('b300', 128, 192, 256) / time('b200', 128, 192, 256)).toBeCloseTo(0.75, 12);
+    expect(time('b300', 256, 192, 256) / time('b200', 256, 192, 256)).toBeCloseTo(2 / 3, 12);
+    // The estimator can choose either reduction width instead of always padding to 96.
+    expect(time('b300', 128, 64, 128) / time('b300', 128, 96, 128)).toBeCloseTo(2 / 3, 12);
+  }
+});
+
+test('Rubin GEMMs use format-specific reduction widths', () => {
+  const chip = CHIPS_BY_ID['vr100-nvl72'];
+  for (const [dtype, k] of [
+    ['bf16', 16],
+    ['fp8', 64],
+    ['mxfp8', 64],
+    ['fp4', 128],
+    ['mxfp4', 128],
+    ['nvfp4', 128],
+  ] as const) {
+    const time = (reduction: number, groups = 1) =>
+      gemmCost(chip, 128, reduction, 128, groups, dtype).compute;
+    expect(time(k / 2)).toBe(time(k));
+    expect(time(k + 1) / time(k)).toBeCloseTo(2, 12);
+    expect(time(k, 2) / time(k)).toBeCloseTo(2, 12);
+    expect(gemmCost(chip, 128, k, 128, undefined, dtype).compute).toBe(time(k));
+  }
+});
+
+test('TPU expert work uses streamed rows and generation-specific array widths', () => {
+  for (const id of ['tpu-v5p', 'tpu-v6e', 'tpu-v7x']) {
+    const chip = CHIPS_BY_ID[id];
+    const width = id === 'tpu-v5p' ? 128 : 256;
+    const time = (m: number, k = width, n = width, groups = 1) =>
+      gemmCost(chip, m, k, n, groups).compute;
+    expect(time(1)).toBe(time(8));
+    expect(time(8)).toBe(time(width, width, 8));
+    expect(time(16) / time(8)).toBeCloseTo(2, 12);
+    expect(time(16, width, width, 8) / time(16)).toBeCloseTo(4, 12);
+    expect(time(8, width / 2, width / 2)).toBe(time(8));
+    expect(time(8, width + 1) / time(8)).toBeCloseTo(2, 12);
+  }
+});
+
+test('Neuron uses either orientation and Trainium2 FP8 doubles contraction width', () => {
+  for (const id of ['inferentia2', 'trainium1', 'trainium2']) {
+    const chip = CHIPS_BY_ID[id];
+    expect(gemmCost(chip, 1).compute).toBe(gemmCost(chip, 64).compute);
+    expect(gemmCost(chip, 64).compute).toBe(gemmCost(chip, 128, 128, 64).compute);
+  }
+  const chip = CHIPS_BY_ID['trainium2'];
+  const time = (k: number, dtype: Dtype) => gemmCost(chip, 64, k, 128, 1, dtype).compute;
+  expect(time(128, 'fp8')).toBe(time(256, 'fp8'));
+  expect(time(256, 'bf16') / time(128, 'bf16')).toBeCloseTo(2, 12);
+  expect(time(256, 'fp8') / time(256, 'bf16')).toBeCloseTo(
+    peakFlops(chip, 'bf16')! / peakFlops(chip, 'fp8')!,
+    12,
+  );
+});
+
+test('Gaudi pads the output array while streaming the reduction dimension', () => {
+  for (const id of ['gaudi2', 'gaudi3']) {
+    const chip = CHIPS_BY_ID[id];
+    const time = (m: number, k: number, n: number) => gemmCost(chip, m, k, n).compute;
+    expect(time(128, 17, 128)).toBe(time(256, 17, 256));
+    expect(time(256, 34, 256) / time(256, 17, 256)).toBeCloseTo(2, 12);
+  }
+});
+
+test('every chip declares valid shapes for each arithmetic dtype', () => {
+  for (const chip of CHIPS)
+    for (const dtype of DTYPES) {
+      expect(chip.mmaShapes[dtype].length).toBeGreaterThan(0);
+      for (const s of chip.mmaShapes[dtype]) {
+        for (const dim of [s.m, s.n, s.k]) expect(Number.isInteger(dim) && dim > 0).toBe(true);
+        expect(s.rate).toBeGreaterThan(0);
+        expect(s.rate).toBeLessThanOrEqual(1);
+      }
+    }
+});
+
+test('dense and one-group GEMMs have identical costs on every chip and native dtype', () => {
+  for (const chip of CHIPS)
+    for (const dtype of DTYPES.filter((d) => peakFlops(chip, d)))
+      for (const m of [2, 16.25, 64, 129])
+        expect(gemmCost(chip, m, 33, 19, 1, dtype)).toEqual(
+          gemmCost(chip, m, 33, 19, undefined, dtype),
+        );
+});
+
+test('Hopper small FP8 shapes use the widening rate, large shapes use native FP8', () => {
+  const time = (m: number, dtype: Dtype) => gemmCost(h100, m, 128, 128, undefined, dtype).compute;
+  expect(time(2, 'fp8') / time(2, 'bf16')).toBeCloseTo(1, 2);
+  expect(time(128, 'fp8') / time(128, 'bf16')).toBeCloseTo(0.5, 3);
+  // Native FP8 at 16 rows is ~60% of FP8 peak; 32 rows is near full rate.
+  expect(time(16, 'fp8') / time(128, 'fp8')).toBeCloseTo(16 / 0.6 / 128, 12);
+  for (const dtype of ['bf16', 'fp8'] as const) {
+    expect(time(32, dtype) / time(128, dtype)).toBeCloseTo(0.25, 12);
+    expect(time(32, dtype)).toBe(gemmCost(h100, 128, 128, 32, undefined, dtype).compute);
+  }
+});
+
+test('shape costs include N/K padding and rate without changing memory traffic', () => {
+  const chip: ChipSpec = {
+    ...h100,
+    mmaShapes: {
+      ...h100.mmaShapes,
+      bf16: [
+        { m: 8, n: 128, k: 128, rate: 1 },
+        { m: 16, n: 8, k: 16, rate: 0.5 },
+      ],
+    },
+  };
+  // The larger M wins for thin N/K despite running at half rate.
+  const narrow = gemmCost(chip, 8, 16, 8);
+  const ideal = gemmCost(idealTiles, 8, 16, 8);
+  expect(narrow.compute / ideal.compute).toBeCloseTo(4, 9);
+  expect(narrow.memory).toBe(ideal.memory);
+  expect(gemmCost(chip, 8).compute).toBe(gemmCost(idealTiles, 8).compute);
+  expect(gemmCost(chip, 0, 128, 128, 111).compute).toBe(0);
+  // Unit tiles also leave fractional analytical dimensions unrounded.
+  expect(gemmCost(idealTiles, 0.5, 16.25, 8.5, 111).compute).toBe(
+    (2 * 0.5 * 16.25 * 8.5) / (peakFlops(h100, 'bf16')! * h100.realizableFlopsFrac),
+  );
+});
+
+test('gpt-oss-120b decode on one H200 stays under the measured step time', () => {
+  // InferenceX gptoss-fp4-h200-trt, TP=1, 1k/1k, concurrency 64: median
+  // TPOT 22.5 ms (github.com/SemiAnalysisAI/InferenceX, run 26016892349)
+  const measured = 22.5e-3;
+  const model = MODEL_PRESETS.find((m) => m.name === 'gpt-oss-120b MXFP4/BF16')!;
+  const h200 = CHIPS_BY_ID['h200-sxm'];
+  const result = evaluateDecodeAtBatch(
+    { model, deployment: singleChip(h200), workload: { prefillLen: 1024, generateLen: 1024 } },
+    64,
+    1,
+    { costBackend: makeNaiveOpCostSumBackend({ memoryOverlap: 0.9, commsOverlap: 0.65 }) },
+  );
+  if (!result.ok) throw new Error(result.diags.map((x) => x.message).join(', '));
+  expect(result.stepTime).toBeLessThan(measured);
+  // Weight traffic dominates decode at this batch.
+  expect(result.cost.busy.memory).toBeGreaterThan(result.cost.busy.compute);
+});
+
+test('a gemm charges its activation streams to memory', () => {
+  const [m, k, n] = [256, 512, 1024];
+  const cost = gemmCost(h100, m, k, n);
   // rows in and rows out; the weights are priced by their own load node
   expect(cost.memory).toBeCloseTo((m * (k + n) * 2) / hbm, 15);
 });
