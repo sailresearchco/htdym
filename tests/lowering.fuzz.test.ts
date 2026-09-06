@@ -14,13 +14,7 @@ import { ModelSpec } from '../src/core/model/models';
 import { gqa, linearAttn, mla } from '../src/core/model/block/attn';
 import { denseMlp, moeMlp } from '../src/core/model/block/mlp';
 import { DTYPE_BYTES, type Dtype } from '../src/core/model/dtype';
-import {
-  expertReadFraction,
-  flopsPerPrefillToken,
-  kvBytesPerSeq,
-  routedExpertParams,
-  weightBytesTotal,
-} from '../src/core/model/utils';
+import { flopsPerPrefillToken, kvBytesPerSeq, weightBytesTotal } from '../src/core/model/utils';
 
 // The closed forms in model/utils compute FLOPs and bytes algebraically
 // from the spec, while lowering builds sharded tensors op by op. They
@@ -172,8 +166,7 @@ fuzzTest('stage partitioning preserves the flattened layer stack', (rand) => {
 
 fuzzTest('single-chip prefill conserves the closed-form FLOPs and bytes', (rand) => {
   const { model } = generator(rand);
-  // large and tile-aligned so utilization is exactly 1 and virtually
-  // every expert is activated
+  // Large enough to activate virtually every expert.
   const T = 16384;
 
   const m = model();
@@ -207,20 +200,13 @@ fuzzTest('single-chip prefill conserves the closed-form FLOPs and bytes', (rand)
     0,
   );
 
-  // the embedding gather is not lowered, and routed experts stream only
-  // the activated fraction
+  // At this token count, virtually all expert weights are read.
+  // The embedding gather is not lowered.
   const emb = m.tiedEmbeddings
     ? 0
     : m.vocab * m.modelDim * DTYPE_BYTES[m.precision.weights.embeddings];
-  const inactive =
-    routedExpertParams(m) *
-    DTYPE_BYTES[m.precision.weights.routedExperts] *
-    (1 - expertReadFraction(m, T));
   const bytes =
-    weightBytesTotal(m) -
-    emb -
-    inactive +
-    kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
+    weightBytesTotal(m) - emb + kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
   expect((r.cost.busy.memory - acts / hbm) / (bytes / hbm)).toBeCloseTo(1, 9);
 });
 

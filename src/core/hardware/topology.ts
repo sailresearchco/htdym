@@ -84,10 +84,6 @@ export interface MeshDim {
   stride: number;
 }
 
-export function reachableChips(ic: InterconnectSpec): number {
-  return ic.domainSize * (ic.scaleOut?.maxNodes ?? 1);
-}
-
 // Resolve the machine a deployment occupies into named physical axes.
 export function deployedAxes(
   ic: InterconnectSpec,

@@ -38,15 +38,6 @@
     "prettier": "^3.6.2",
     "typescript": "^5.5.3",
     "vite": "^5.3.4",
-    "vitest": "^2.0.4",
-    "prettier": "^3.6.2"
-  },
-  "prettier": {
-    "printWidth": 100,
-    "singleQuote": true,
-    "trailingComma": "all",
-    "semi": true,
-    "arrowParens": "always",
-    "objectWrap": "collapse"
+    "vitest": "^2.0.4"
   }
 }

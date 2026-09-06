@@ -15,7 +15,6 @@ export interface MoeArgs {
   acts: CategoryDtypes;
   // width of the residual stream the block's output reductions land in
   residual: Dtype;
-  activatedFrac: number;
 }
 
 export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
@@ -25,6 +24,8 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
   const ep = roleSize(mesh, 'EP');
   const d = x.type.shape[1];
   const inner = mlp.latentDim || d;
+  // Under uniform routing, an expert is untouched only if every token misses it.
+  const activatedFrac = 1 - Math.pow(1 - mlp.topK / mlp.experts, args.tokensTotal);
 
   // the small [D, E] router replicates on every rank
   // so each can pick global top-k without gathering logits
@@ -98,11 +99,11 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
       variant: mlp.variant,
       weights: args.weights.routedExperts,
       dtype: args.acts.routedExperts,
-      loadFraction: args.activatedFrac,
+      loadFraction: activatedFrac,
       experts: {
         count: mlp.experts,
         epSharding: roles['EP'],
-        activeGroups: (mlp.experts * args.activatedFrac) / ep,
+        activeGroups: (mlp.experts * activatedFrac) / ep,
       },
       extraDeps: [router],
     }); // [(B*topK)_ep, D] -> [(B*topK)_ep, D] {U_etp}
@@ -154,11 +155,11 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
       variant: mlp.variant,
       weights: args.weights.routedExperts,
       dtype: args.acts.routedExperts,
-      loadFraction: args.activatedFrac,
+      loadFraction: activatedFrac,
       experts: {
         count: mlp.experts,
         epSharding: roles['EP'],
-        activeGroups: (mlp.experts * args.activatedFrac) / ep,
+        activeGroups: (mlp.experts * activatedFrac) / ep,
       },
     }); // [(B * topK)_ep, L] -> [(B * topK)_ep, L] {U_etp}
 

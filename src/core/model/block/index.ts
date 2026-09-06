@@ -179,7 +179,7 @@ export function blockAttnFlopsDecodeParts(b: BlockSpec, ctx: number): AttnFlopPa
   };
 }
 
-export function blockAttnFlopsDecode(b: BlockSpec, ctx: number): number {
+function blockAttnFlopsDecode(b: BlockSpec, ctx: number): number {
   const p = blockAttnFlopsDecodeParts(b, ctx);
   return p.core + p.indexer;
 }
@@ -225,11 +225,6 @@ export function blockAttnFlopsPrefillParts(b: BlockSpec, T: number): AttnFlopPar
     core: 2 * (localPairs + longPairs) * N * (H + H),
     indexer: a.indexer ? 2 * indexPairs * a.indexer.heads * a.indexer.headDim : 0,
   };
-}
-
-export function blockAttnFlopsPrefill(b: BlockSpec, T: number): number {
-  const p = blockAttnFlopsPrefillParts(b, T);
-  return p.core + p.indexer;
 }
 
 // KV bytes one sequence stores for one block ('store') or one decode step

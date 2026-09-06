@@ -194,6 +194,41 @@ test('single-chip MoE prefill matches the closed-form roofline', () => {
   expect(prefillCompute(model, T) / ideal).toBeCloseTo(1, 6);
 });
 
+test('mixed MoE layers use their own routing fraction', () => {
+  const base = MODEL_PRESETS.find((m) => m.name === 'LLaMA 3 8B')!;
+  const model: ModelSpec = {
+    ...base,
+    blocks: [
+      {
+        repeat: 1,
+        pattern: [4, 8].map((topK, i) => ({
+          count: 1,
+          block: {
+            attn: base.blocks[0].pattern[0].block.attn,
+            mlp: moeMlp({ experts: 64, topK, expertDim: 128 * (i + 1) }),
+          },
+        })),
+      },
+    ],
+  };
+  const r = evaluateDecodeAtBatch(
+    { model, deployment: singleChip(), workload: { prefillLen: 1, generateLen: 0 } },
+    1,
+    1,
+    { costBackend: backend },
+  );
+  if (!r.ok) throw new Error('eval failed');
+  const ops = r.perStageTrace[0].flatMap((s) => s.ops);
+  expect(
+    ops.flatMap((op) => (op.kind === 'gemm' && op.label === 'experts-in' ? [op.groups] : [])),
+  ).toEqual([4, 8]);
+  expect(
+    ops.flatMap((op) =>
+      op.kind === 'weight-load' && op.label === 'experts-in-weight' ? [op.loadFraction] : [],
+    ),
+  ).toEqual([1 / 16, 1 / 8]);
+});
+
 test('single-chip dense prefill memory matches weights plus KV writes', () => {
   const model = MODEL_PRESETS.find((m) => m.name === 'LLaMA 3 8B')!;
   const T = 512;

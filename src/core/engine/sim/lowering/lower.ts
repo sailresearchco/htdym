@@ -1,4 +1,3 @@
-import { expertReadFraction } from '../../../model/utils';
 import { ModelSpec } from '../../../model/models';
 import { DTYPE_BYTES } from '../../../model/dtype';
 import {
@@ -174,7 +173,6 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         weights: precision.weights,
         acts,
         residual: precision.residual,
-        activatedFrac: expertReadFraction(model, tokensTotal),
       });
 
       residual = trace.expect(residual, residualT); // [B_dpa, D]

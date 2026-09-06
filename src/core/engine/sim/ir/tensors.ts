@@ -49,7 +49,7 @@ export function typeEq(a: TensorType, b: TensorType): boolean {
   );
 }
 
-export function globalElems(type: TensorType): number {
+function globalElems(type: TensorType): number {
   return type.shape.reduce((acc, shape) => acc * shape, 1);
 }
 

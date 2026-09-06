@@ -8,13 +8,7 @@ import { matmulSeconds } from '../src/core/engine/roofline';
 import { PhysAxis } from '../src/core/hardware/topology';
 import { MODEL_PRESETS } from '../src/core/model/models';
 import { DTYPE_BYTES } from '../src/core/model/dtype';
-import {
-  expertReadFraction,
-  flopsPerPrefillToken,
-  kvBytesPerSeq,
-  routedExpertParams,
-  weightBytesTotal,
-} from '../src/core/model/utils';
+import { flopsPerPrefillToken, kvBytesPerSeq, weightBytesTotal } from '../src/core/model/utils';
 
 const backend = makeNaiveOpCostSumBackend({ memoryOverlap: 0, commsOverlap: 0 });
 const chip: ChipSpec = {
@@ -48,6 +42,7 @@ function singleChip(): Deployment {
 // only automated check that the trace and the closed forms in model/utils
 // still agree on an architecture either one of them could get wrong alone.
 test('every preset conserves the closed-form FLOPs and bytes', () => {
+  // Large enough to activate virtually every expert; run.test.ts covers small batches.
   const T = 16384;
   for (const m of MODEL_PRESETS) {
     const r = evaluatePrefill(
@@ -76,15 +71,8 @@ test('every preset conserves the closed-form FLOPs and bytes', () => {
     const emb = m.tiedEmbeddings
       ? 0
       : m.vocab * m.modelDim * DTYPE_BYTES[m.precision.weights.embeddings];
-    const inactive =
-      routedExpertParams(m) *
-      DTYPE_BYTES[m.precision.weights.routedExperts] *
-      (1 - expertReadFraction(m, T));
     const bytes =
-      weightBytesTotal(m) -
-      emb -
-      inactive +
-      kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
+      weightBytesTotal(m) - emb + kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
     const fl = r.cost.busy.compute / ideal,
       by = (r.cost.busy.memory - acts / hbm) / (bytes / hbm);
     expect(fl).toBeCloseTo(1, 9);

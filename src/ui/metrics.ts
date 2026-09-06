@@ -244,7 +244,7 @@ const METRICS: MetricDef[] = [
  * tokens plus S decode tokens, served at the machine's aggregate per-phase
  * rates. Null until both phases are evaluated.
  */
-export function machineRps(r: UiResult): number | null {
+function machineRps(r: UiResult): number | null {
   const pf = r.prefill;
   const dec = r.decode;
   if (!pf || !dec) return null;
