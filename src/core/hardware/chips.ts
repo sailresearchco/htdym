@@ -1,20 +1,34 @@
 import type { Dtype } from '../model/dtype';
 import { InterconnectSpec, SliceTopology } from './topology';
+import {
+  type MmaShapes,
+  AMPERE_MMA,
+  ADA_MMA,
+  HOPPER_MMA,
+  BLACKWELL_MMA,
+  BLACKWELL_ULTRA_MMA,
+  RUBIN_MMA,
+  SM120_MMA,
+  CDNA3_MMA,
+  CDNA4_MMA,
+  GAUDI_MMA,
+  NEURON_V2_MMA,
+  NEURON_V3_MMA,
+  TPU_V5P_MMA,
+  TPU_V6E_MMA,
+  TPU_V7X_MMA,
+} from './mma';
 
 export interface ChipSpec {
   id: string;
   name: string;
   vendor: string;
 
-  // What a chip supports for a give format: a number is a peak dense matmul rate,
-  // the chip has a unit and multiplies the format as stored, and 'kernel-widened'
-  // means there is a known kernel which can unpack a tensor of this format
-  // on its way from HBM into the matmul units into a wider format, meaning
-  // it can be used to speed up weight loads, just not matmul flops/sec.
-  // If there is no entry for a dtype, we still assume a kernel could exist
-  // and price accordingly, but we'll throw a warning that it needs to be written.
-  // We assume these kernels don't add any overhead, which is not a perfect assumption,
-  // but probably close enough in practice, it shouldn't be too hard to pipeline.
+  // Native dense matmul peak in FLOP/s, or 'kernel-widened' when a known kernel
+  // can unpack stored weights into a supported format. Missing entries also
+  // assume a widening kernel, but trigger a warning that one is needed.
+  // Stored weight dtype sets weight traffic; resolved compute dtype sets throughput.
+  // Unpacking/conversion overhead is omitted.
   //
   // bf16 must be a rate: it is the floor every substitution ladder
   // ends at, which is what lets runsAs always land somewhere.
@@ -35,21 +49,15 @@ export interface ChipSpec {
   tdp?: number;
   // Fraction of the datasheet matmul rate a well-tuned, well-shaped GEMM
   // sustains (sustained clocks, kernel quality). Derates compute pricing
-  // only; shape-dependent padding is priced separately via matmulSatRows.
+  // only; padding and relative instruction throughput are priced via mmaShapes.
   realizableFlopsFrac: number;
   // Fraction of hbmBandwidth a well-tuned streaming kernel sustains;
   // derates every memory price.
   realizableHbmBwFrac: number;
-  // Edge of the matmul array's tile: every GEMM dim (M, N and K) pads up
-  // to it, so thin shards run at padded-volume utilization (a 64-deep
-  // contraction on a 128x128 MXU idles half the array).
-  // DEFAULT_MATMUL_SAT_ROWS = 128, since TPU MXUs are 128x128 and
-  // H100-class GEMMs want >=128-row tiles.
-  matmulSatRows?: number;
+  // Arithmetic paths by resolved compute dtype, shared by dense/grouped GEMMs.
+  // Uncharacterized paths use the explicit APPROXIMATE_MMA table.
+  mmaShapes: MmaShapes;
 }
-
-// Fallback ChipSpec.matmulSatRows, see that field's doc.
-export const DEFAULT_MATMUL_SAT_ROWS = 128;
 
 // What a format degrades to when a chip has no matmul unit for it: each names
 // the next format its data can be unpacked into, and following the chain gives
@@ -112,6 +120,7 @@ const V7X_SLICES = slices([
 export const CHIPS: ChipSpec[] = [
   {
     id: 'a100-sxm',
+    mmaShapes: AMPERE_MMA,
     name: 'A100 SXM',
     vendor: 'NVIDIA',
     formats: {
@@ -142,6 +151,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'h100-sxm',
+    mmaShapes: HOPPER_MMA,
     name: 'H100 SXM',
     vendor: 'NVIDIA',
     // int8 shares the fp8 unit and rate. No int4 unit: Hopper dropped it.
@@ -174,6 +184,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'h200-sxm',
+    mmaShapes: HOPPER_MMA,
     name: 'H200 SXM',
     vendor: 'NVIDIA',
     // same GH100 die: units and kernel story as H100 above
@@ -204,6 +215,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'b200',
+    mmaShapes: BLACKWELL_MMA,
     name: 'B200 SXM',
     vendor: 'NVIDIA',
     formats: {
@@ -235,6 +247,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'gb200-nvl72',
+    mmaShapes: BLACKWELL_MMA,
     name: 'GB200 NVL72',
     vendor: 'NVIDIA',
     // same units and int4 kernel story as the B200 entry above
@@ -264,6 +277,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'b300',
+    mmaShapes: BLACKWELL_ULTRA_MMA,
     name: 'B300 SXM',
     vendor: 'NVIDIA',
     // Blackwell Ultra's uplift is FP4-only. NVIDIA quotes DGX B300 at 108
@@ -301,6 +315,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'vr100-nvl72',
+    mmaShapes: RUBIN_MMA,
     name: 'VR100 NVL72',
     vendor: 'NVIDIA',
     formats: {
@@ -327,6 +342,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'rtx-pro-6000',
+    mmaShapes: SM120_MMA,
     name: 'RTX PRO 6000',
     vendor: 'NVIDIA',
     formats: {
@@ -361,6 +377,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'rtx-5090',
+    mmaShapes: SM120_MMA,
     name: 'RTX 5090',
     vendor: 'NVIDIA',
     formats: {
@@ -396,6 +413,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'rtx-4090',
+    mmaShapes: ADA_MMA,
     name: 'RTX 4090',
     vendor: 'NVIDIA',
     formats: {
@@ -428,6 +446,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'mi300x',
+    mmaShapes: CDNA3_MMA,
     name: 'MI300X',
     vendor: 'AMD',
     formats: {
@@ -460,6 +479,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'mi325x',
+    mmaShapes: CDNA3_MMA,
     name: 'MI325X',
     vendor: 'AMD',
     formats: {
@@ -488,6 +508,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'mi355x',
+    mmaShapes: CDNA4_MMA,
     name: 'MI355X',
     vendor: 'AMD',
     formats: {
@@ -519,6 +540,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'gaudi2',
+    mmaShapes: GAUDI_MMA,
     name: 'Gaudi 2',
     vendor: 'Intel',
     formats: { bf16: 432e12, fp8: 865e12, int8: 'kernel-widened' },
@@ -540,6 +562,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'gaudi3',
+    mmaShapes: GAUDI_MMA,
     name: 'Gaudi 3',
     vendor: 'Intel',
     formats: { bf16: 1835e12, fp8: 1835e12, int8: 'kernel-widened' },
@@ -562,6 +585,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'inferentia2',
+    mmaShapes: NEURON_V2_MMA,
     name: 'Inferentia2',
     vendor: 'AWS',
     formats: { bf16: 190e12, fp8: 190e12, int8: 380e12 },
@@ -587,6 +611,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'trainium1',
+    mmaShapes: NEURON_V2_MMA,
     name: 'Trainium1',
     vendor: 'AWS',
     formats: { bf16: 190e12, fp8: 190e12, int8: 380e12 },
@@ -613,6 +638,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'trainium2',
+    mmaShapes: NEURON_V3_MMA,
     name: 'Trainium2',
     vendor: 'AWS',
     formats: { bf16: 668.75e12, fp8: 1300e12, int8: 'kernel-widened' },
@@ -638,6 +664,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'tpu-v5p',
+    mmaShapes: TPU_V5P_MMA,
     name: 'TPU v5p',
     vendor: 'Google',
     formats: { bf16: 459e12, int8: 918e12, int4: 1836e12, fp8: 'kernel-widened' },
@@ -662,6 +689,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'tpu-v6e',
+    mmaShapes: TPU_V6E_MMA,
     name: 'TPU v6e',
     vendor: 'Google',
     formats: { bf16: 918e12, int8: 1836e12, int4: 3672e12, fp8: 'kernel-widened' },
@@ -684,6 +712,7 @@ export const CHIPS: ChipSpec[] = [
   },
   {
     id: 'tpu-v7x',
+    mmaShapes: TPU_V7X_MMA,
     name: 'TPU v7x',
     vendor: 'Google',
     formats: {

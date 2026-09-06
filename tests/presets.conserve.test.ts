@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { IDEAL_MMA } from './fixtures';
 import { evaluatePrefill } from '../src/core/engine/sim/run/prefill';
 import { makeNaiveOpCostSumBackend } from '../src/core/engine/sim/cost/naiveOpCostSum';
 import { Deployment, makeMesh } from '../src/core/engine/surface/deploy';
@@ -21,7 +22,7 @@ const chip: ChipSpec = {
   interconnect: { bandwidthPerChip: 4e11, latency: 0, domainSize: 64 },
   realizableFlopsFrac: 0.8,
   realizableHbmBwFrac: 0.85,
-  matmulSatRows: 1,
+  mmaShapes: IDEAL_MMA,
 };
 const hbm = chip.hbmBandwidth * chip.realizableHbmBwFrac;
 function singleChip(): Deployment {

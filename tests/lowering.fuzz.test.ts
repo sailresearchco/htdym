@@ -1,4 +1,5 @@
 import { expect } from 'vitest';
+import { IDEAL_MMA } from './fixtures';
 import { fuzzTest } from './fuzz';
 import { randAxes, randPlacement } from './gen';
 import { evaluatePrefill } from '../src/core/engine/sim/run/prefill';
@@ -35,9 +36,7 @@ const chip: ChipSpec = {
   interconnect: { bandwidthPerChip: 4e11, latency: 0, domainSize: 64 },
   realizableFlopsFrac: 0.8,
   realizableHbmBwFrac: 0.85,
-  // 1x1 matmul tiles: these oracles check conservation, so random
-  // unaligned dims must not pay tile padding
-  matmulSatRows: 1,
+  mmaShapes: IDEAL_MMA,
 };
 const hbm = chip.hbmBandwidth * chip.realizableHbmBwFrac;
 

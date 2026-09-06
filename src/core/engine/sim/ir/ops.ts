@@ -26,9 +26,9 @@ export interface GemmOp extends OpBase {
   // format this matmul's operands arrive in, which picks the chip's peak for
   // it and sizes the rows it streams
   dtype: Dtype;
-  // independent identical matmuls batched in one launch (grouped GEMM:
-  // activated experts). Tile padding is per group. FLOPs already count all
-  // m rows, so groups does not multiply them.
+  // Estimated active groups (experts) per device, sharing K and N. The input's M
+  // counts all routed rows before sharding; individual group sizes are not
+  // represented. The cost backend estimates their padding from this count.
   groups?: number;
 }
 
