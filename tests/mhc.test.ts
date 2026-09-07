@@ -54,7 +54,7 @@ test('hyper-connections widen only the stage-boundary send', () => {
 });
 
 test('the DSA indexer carries its own weights', () => {
-  const glm = MODEL_PRESETS.find((x) => x.name.startsWith('GLM 5.2'))!;
+  const glm = MODEL_PRESETS.find((x) => x.name.startsWith('GLM 5.3'))!;
   const b = glm.blocks[0].pattern[0].block;
   if (b.attn.kind !== 'mla' || !b.attn.dsa) throw new Error('expected an MLA block with DSA');
   const { dsa, dqc } = b.attn;

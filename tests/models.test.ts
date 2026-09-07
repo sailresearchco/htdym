@@ -185,3 +185,76 @@ test('Qwen3.8 27B reproduces its hybrid linear/full stack and decoder scale', ()
   const kv = (len: number) => kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], len);
   expect(kv(2 * 131072) - kv(131072)).toBe(16 * 2 * 4 * 256 * DTYPE_BYTES.bf16 * 131072);
 });
+
+test('DeepSeek V4 Pro matches the released decoder layout and scale', () => {
+  const m = MODEL_PRESETS.find((x) => x.name === 'DeepSeek V4 Pro MXFP4/FP8')!;
+  const layers = m.blocks.flatMap((g) =>
+    Array.from({ length: g.repeat }, () =>
+      g.pattern.flatMap((r) => Array.from({ length: r.count }, () => r.block)),
+    ).flat(),
+  );
+  // config.json has 61 decoder layers plus a trailing MTP entry. Pro's
+  // first two layers compress at 128, unlike Flash's sliding-only prefix.
+  expect(layerCount(m)).toBe(61);
+  expect(layers.filter((b) => b.attn.kind === 'csa')).toHaveLength(30);
+  expect(layers.filter((b) => b.attn.kind === 'hca')).toHaveLength(31);
+  expect(layers.slice(0, 3).map((b) => b.attn.kind)).toEqual(['hca', 'hca', 'csa']);
+  expect(layers.at(-1)?.attn.kind).toBe('csa');
+  expect(layers[2].attn).toMatchObject({
+    queryHeads: 128,
+    qRank: 1536,
+    outputGroups: 16,
+    indexer: { topK: 1024 },
+  });
+  expect(layers.every((b) => b.mlp.kind === 'moe')).toBe(true);
+  expect(m.residualStreams).toBe(4);
+  // Match the model card at its published precision (one decimal trillion).
+  // The simulated decoder omits the MTP draft and small norm/mHC weights.
+  expect(totalParams(m) / 1e12).toBeCloseTo(1.6, 1);
+  expect(activeParams(m) / 49e9).toBeCloseTo(1, 1);
+  expect(m.precision.weights.routedExperts).toBe('mxfp4');
+  expect(m.precision.activations.routedExperts).toBe('fp8');
+  expect(m.precision.kv).toBe('fp8');
+  const len = 1 << 20;
+  const coreEntry = (512 - 64) * DTYPE_BYTES.fp8 + 64 * DTYPE_BYTES.bf16;
+  const indexEntry = 128 * DTYPE_BYTES.mxfp4;
+  expect(kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], len)).toBe(
+    61 * 128 * coreEntry + 30 * (len / 4) * (coreEntry + indexEntry) + 31 * (len / 128) * coreEntry,
+  );
+  expect(flopsPerDecodeToken(m, len).get('fp4')).toBe(30 * 2 * (len / 4) * 64 * 128);
+});
+
+test('GLM 5.3 FP8 retains the published GLM 5.2 architecture and serving precision', () => {
+  const m = MODEL_PRESETS.find((x) => x.name === 'GLM 5.3 FP8')!;
+  expect(MODEL_PRESETS.some((x) => x.name.startsWith('GLM 5.2'))).toBe(false);
+  expect(layerCount(m)).toBe(78);
+  expect(m.modelDim).toBe(6144);
+  expect(m.vocab).toBe(154880);
+  expect(m.blocks[0].pattern[0].count).toBe(3);
+  expect(m.blocks[0].pattern[0].block.mlp).toMatchObject({ kind: 'dense', ffDim: 12288 });
+  expect(m.blocks[1].pattern[0].count).toBe(75);
+  expect(m.blocks[1].pattern[0].block.mlp).toMatchObject({
+    kind: 'moe',
+    experts: 256,
+    topK: 8,
+    expertDim: 2048,
+    sharedExperts: 1,
+  });
+  expect(m.blocks[0].pattern[0].block.attn).toMatchObject({
+    kind: 'mla',
+    queryHeads: 64,
+    headDim: 192,
+    dc: 512,
+    dqc: 2048,
+    dRope: 64,
+    valueHeadDim: 256,
+    dsa: { topk: 2048, indexHeads: 32, indexHeadDim: 128, shareEvery: 4 },
+  });
+  expect(totalParams(m) / 744e9).toBeCloseTo(1, 2);
+  expect(activeParams(m) / 40e9).toBeCloseTo(1, 1);
+  expect(m.precision.weights.routedExperts).toBe('fp8');
+  expect(m.precision.activations.routedExperts).toBe('fp8');
+  expect(m.precision.weights.embeddings).toBe('bf16');
+  expect(m.precision.residual).toBe('bf16');
+  expect(m.precision.kv).toBe('fp8');
+});
