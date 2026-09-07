@@ -64,6 +64,16 @@ const v4Csa = compressedMqa({
 const v4Hca = compressedMqa({ ...v4Attn, kind: 'hca', compressionRate: 128 });
 const v4Moe = moeMlp({ experts: 256, topK: 6, expertDim: 2048, sharedExperts: 1 });
 
+const v4ProAttn = { ...v4Attn, N: 128, qRank: 1536, outputGroups: 16 };
+const v4ProCsa = compressedMqa({
+  ...v4ProAttn,
+  kind: 'csa',
+  compressionRate: 4,
+  indexer: { heads: 64, headDim: 128, topK: 1024, cacheDtype: 'mxfp4' },
+});
+const v4ProHca = compressedMqa({ ...v4ProAttn, kind: 'hca', compressionRate: 128 });
+const v4ProMoe = moeMlp({ experts: 384, topK: 6, expertDim: 3072, sharedExperts: 1 });
+
 export const MODEL_PRESETS: ModelSpec[] = [
   {
     name: 'Gemma 4 31B',
@@ -145,7 +155,41 @@ export const MODEL_PRESETS: ModelSpec[] = [
     ],
   },
   {
-    name: 'GLM 5.2 FP8',
+    name: 'DeepSeek V4 Pro MXFP4/FP8',
+    // https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json
+    modelDim: 7168,
+    vocab: 129280,
+    tiedEmbeddings: false,
+    precision: {
+      // Same native mixed-precision recipe as Flash: E2M1 expert weights
+      // with E8M0 scales per 32 values; FP8 for the main GEMMs and KV.
+      weights: { ...FP8_ALL, routedExperts: 'mxfp4', router: 'bf16', embeddings: 'bf16' },
+      activations: { ...FP8_ALL, router: 'bf16', embeddings: 'bf16' },
+      residual: 'bf16',
+      kv: 'fp8',
+      indexer: 'fp4',
+    },
+    residualStreams: 4,
+    // Pro starts with two HCA layers, then 59 alternating CSA/HCA layers:
+    // 30 CSA + 31 HCA. The trailing zero in compress_ratios is the MTP
+    // draft layer, which is outside this 61-layer decoder simulation.
+    blocks: [
+      ...repeat(2, v4ProHca, v4ProMoe),
+      ...swaStack({
+        layers: 59,
+        localPerPattern: 1,
+        globalPerPattern: 1,
+        local: v4ProCsa,
+        global: v4ProHca,
+        mlp: v4ProMoe,
+      }),
+    ],
+  },
+  {
+    // GLM 5.3 is a post-training update of the same GLM 5.2 base model.
+    // https://huggingface.co/zai-org/GLM-5.3/blob/main/config.json
+    // FP8 KV follows https://recipes.vllm.ai/zai-org/GLM-5.3
+    name: 'GLM 5.3 FP8',
     modelDim: 6144,
     vocab: 154880,
     tiedEmbeddings: false,
