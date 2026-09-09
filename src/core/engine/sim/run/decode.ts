@@ -7,6 +7,7 @@ import type { DecodeEvaluation, EvalOptions, SimInput } from '../../surface/api'
 import { memoryFootprint } from './memory';
 import { runnableOn, validateInput } from './validate';
 import { runPipeline } from './common';
+import { hbmTraffic } from './traffic';
 
 export function evaluateDecodeAtBatch<TBackend extends CostBackend>(
   input: SimInput,
@@ -61,10 +62,22 @@ export function evaluateDecodeAtBatch<TBackend extends CostBackend>(
     ),
   );
 
+  // every stage runs the same chip count, so the per-chip mean is the mean over stages
+  const traffic = run.perStageTrace
+    .map((trace) => hbmTraffic(trace, deployment.mesh.dims))
+    .reduce(
+      (acc, t) => ({
+        weightBytes: acc.weightBytes + t.weightBytes / stages.length,
+        kvBytes: acc.kvBytes + t.kvBytes / stages.length,
+      }),
+      { weightBytes: 0, kvBytes: 0 },
+    );
+
   return {
     ok: true,
     diags,
     memory,
+    traffic,
     stepTime: run.stepTime,
     criticalStage: run.criticalStage,
     tpot: microbatches * run.stepTime,

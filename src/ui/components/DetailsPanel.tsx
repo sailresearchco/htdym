@@ -1,6 +1,6 @@
 /**
  * Details slide-over for one configuration: memory breakdown, roofline
- * component bars, MFU, diagnostics — shown against the group's hardware
+ * component bars, MFU / MBU, diagnostics — shown against the group's hardware
  * rooflines.
  */
 import type { ModelSpec } from '../../core/model/models';
@@ -129,6 +129,17 @@ export function DetailsPanel({ result: r, group, model, overlap, basis, onClose 
             <dd>{fmtSI(dec.tokPerSecPerUser)}</dd>
             <dt>Decode MFU</dt>
             <dd>{fmtPct(dec.mfu)}</dd>
+            <dt>
+              Decode MBU
+              <span
+                className="info-i"
+                data-tip={metricByKey('decodeMbu').info}
+                aria-label="explanation"
+              >
+                ⓘ
+              </span>
+            </dt>
+            <dd>{fmtPct(dec.mbu)}</dd>
             <dt>{pp > 1 ? 'Batch / microbatch' : 'Batch'}</dt>
             <dd>{fmtInt(dec.batchPerStage)}</dd>
             <dt>Resident sequences</dt>

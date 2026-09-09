@@ -678,3 +678,44 @@ test('quantizing only the experts narrows only their share', () => {
   // narrowed at all.
   expect(mixed.comms).toBeCloseTo((wide.comms + narrow.comms) / 2, 15);
 });
+
+// Decode's HBM traffic is the MBU numerator: the weights a chip streams plus
+// the KV it reads and appends, nothing else. On one chip that is the whole
+// model (minus the un-lowered embedding gather) and the batch's KV; under
+// PP it is the per-stage mean, so a PP=2 split halves it.
+test('decode traffic conserves weight and KV bytes and bounds MBU', () => {
+  const model = MODEL_PRESETS.find((m) => m.name === 'LLaMA 3 8B')!;
+  const workload = { prefillLen: 2048, generateLen: 512 };
+  const ctx = workload.prefillLen + workload.generateLen / 2;
+  const batch = 16;
+  const r = evaluateDecodeAtBatch({ model, deployment: singleChip(), workload }, batch, 1, {
+    costBackend: backend,
+  });
+  if (!r.ok) throw new Error(r.diags.map((x) => x.message).join(', '));
+
+  const inputEmb = model.vocab * model.modelDim * DTYPE_BYTES[model.precision.weights.embeddings];
+  expect(r.traffic.weightBytes / (weightBytesTotal(model) - inputEmb)).toBeCloseTo(1, 9);
+  const kvB = DTYPE_BYTES[model.precision.kv];
+  const kvPerSeq = kvBytesPerSeq(model, kvB, ctx, 'read') + kvBytesPerSeq(model, kvB, 1, 'store');
+  expect(r.traffic.kvBytes / (batch * kvPerSeq)).toBeCloseTo(1, 9);
+
+  // with no overlap the step is at least the memory time, so the achieved
+  // bandwidth never exceeds what the chip realizes
+  const mbu = (r.traffic.weightBytes + r.traffic.kvBytes) / r.stepTime / h100.hbmBandwidth;
+  expect(mbu).toBeGreaterThan(0);
+  expect(mbu).toBeLessThanOrEqual(h100.realizableHbmBwFrac + 1e-9);
+
+  // two pipeline stages: each chip streams half the weights per step
+  const axes = deployedAxes(h100.interconnect, { domain: 2, nodes: 1 });
+  const pp2: Deployment = {
+    chip: idealTiles,
+    mesh: makeMesh(axes, { DPA: [], TP: [], EP: [], ETP: [], PP: ['D'] }),
+    moeDispatch: 'ring-of-experts',
+  };
+  const r2 = evaluateDecodeAtBatch({ model, deployment: pp2, workload }, batch, 2, {
+    costBackend: backend,
+  });
+  if (!r2.ok) throw new Error(r2.diags.map((x) => x.message).join(', '));
+  expect(r2.traffic.weightBytes / r.traffic.weightBytes).toBeCloseTo(0.5, 6);
+  expect(r2.traffic.kvBytes / r.traffic.kvBytes).toBeCloseTo(0.5, 6);
+});

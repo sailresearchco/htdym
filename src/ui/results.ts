@@ -83,6 +83,9 @@ export interface UiResult {
     batchPerStage: number;
     residentSeqs: number;
     mfu: number;
+    // model bandwidth utilization: weight + KV bytes streamed per step over
+    // what the chip's peak HBM bandwidth could move in a step
+    mbu: number;
     fracOfCeiling: number;
     // operating tok/s/chip over this config's own B -> inf rate (KV gate
     // off); low = throughput is KV-room-starved, not sharding-limited

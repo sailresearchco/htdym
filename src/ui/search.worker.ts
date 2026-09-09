@@ -165,6 +165,8 @@ function toRow(
       residentSeqs: c.batch! * pp,
       mfu:
         dec.tokPerSecPerChip * matmulSeconds(flopsPerDecodeToken(runnableModel, ctxAvg), chip, 1)!,
+      // like MFU, quoted against the datasheet peak, not the realizable fraction
+      mbu: (dec.traffic.weightBytes + dec.traffic.kvBytes) / dec.stepTime / chip.hbmBandwidth,
       fracOfCeiling: dec.tokPerSecPerChip / hw.decodeCeilingOverlapped,
       batchSaturation: sat.ok ? dec.tokPerSecPerChip / sat.tokPerSecPerChip : undefined,
       boundBy: bound(dec.cost.busy),

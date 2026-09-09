@@ -3,6 +3,9 @@ import type { Deployment, Diagnostic } from './deploy';
 
 import type { Segment } from '../sim/ir/ops';
 import type { CostBackend, TracePriceOf } from '../sim/cost/types';
+import type { HbmTraffic } from '../sim/run/traffic';
+
+export type { HbmTraffic };
 
 export interface SimInput {
   model: ModelSpec;
@@ -63,6 +66,11 @@ export type DecodeEvaluation<TBackend extends CostBackend> =
       memory: MemoryFootprint;
       // time between successive tokens of one sequence (= PP * stepTime)
       tpot: number;
+      // weight and KV bytes one chip streams per step, averaged over the
+      // pipeline's stages (every stage holds the same chip count, so this
+      // is the machine mean). Over stepTime it is the achieved bandwidth
+      // MBU quotes against the chip's peak.
+      traffic: HbmTraffic;
     });
 
 export type PrefillEvaluation<TBackend extends CostBackend> =
