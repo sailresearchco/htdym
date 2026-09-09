@@ -127,8 +127,6 @@ export function DetailsPanel({ result: r, group, model, overlap, basis, onClose 
           <dl className="kv">
             <dt>Tok/s/user (1/TPOT)</dt>
             <dd>{fmtSI(dec.tokPerSecPerUser)}</dd>
-            <dt>Decode MFU</dt>
-            <dd>{fmtPct(dec.mfu)}</dd>
             <dt>
               Decode MBU
               <span
@@ -140,6 +138,8 @@ export function DetailsPanel({ result: r, group, model, overlap, basis, onClose 
               </span>
             </dt>
             <dd>{fmtPct(dec.mbu)}</dd>
+            <dt>Decode MFU</dt>
+            <dd>{fmtPct(dec.mfu)}</dd>
             <dt>{pp > 1 ? 'Batch / microbatch' : 'Batch'}</dt>
             <dd>{fmtInt(dec.batchPerStage)}</dd>
             <dt>Resident sequences</dt>

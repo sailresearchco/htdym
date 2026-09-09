@@ -213,7 +213,7 @@ const METRICS: MetricDef[] = [
     group: 'decode',
     label: 'Decode MBU',
     desc: 'Model bandwidth utilization during decode: weight and KV cache bytes streamed per step, over peak HBM bandwidth.',
-    info: 'Bytes of weights loaded plus KV cache read and appended per decode step on a chip, divided by the step time, as a share of the datasheet HBM bandwidth. Activation traffic is not counted. Tops out at the Realizable HBM BW setting when decode is purely memory-bound.',
+    info: 'Bytes of weights loaded plus KV cache read and appended per decode step on a chip, divided by the step time, as a share of the datasheet HBM bandwidth. Activation traffic is not counted.',
     value: (r) => r.decode?.mbu ?? null,
     format: (r) => (r.decode ? fmtPct(r.decode.mbu) : na),
     chartable: true,
