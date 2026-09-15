@@ -1,10 +1,6 @@
 {
   "rewrites": [
     {
-      "source": "/api/privacy-region",
-      "destination": "https://www.sailresearch.com/api/privacy-region"
-    },
-    {
       "source": "/ingest/static/:path*",
       "destination": "https://us-assets.i.posthog.com/static/:path*"
     },
