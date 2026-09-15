@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@fontsource-variable/geist/wght.css';
 import '@fontsource-variable/geist-mono/wght.css';
-import './analytics';
+import { AnalyticsProvider } from './AnalyticsProvider';
 import { App } from './ui/App';
 import './ui/theme.css';
 
@@ -11,6 +11,8 @@ if (window.matchMedia('(pointer: coarse) and (max-width: 820px)').matches)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <AnalyticsProvider>
+      <App />
+    </AnalyticsProvider>
   </StrictMode>,
 );
