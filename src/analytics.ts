@@ -21,29 +21,7 @@ const ATTRIBUTION_COOKIE_KEYS = [
 
 const key = import.meta.env.VITE_POSTHOG_KEY;
 
-let pageviewCaptured = false;
-
-function capturePageview(): void {
-  if (pageviewCaptured) return;
-  pageviewCaptured = true;
-
-  posthog.capture('$pageview', {
-    $current_url: window.location.href,
-    page_name: 'How to Deploy Your Model',
-    pathname: window.location.pathname,
-    surface: 'htdym',
-  });
-}
-
-export function initializeAnalytics(): void {
-  if (!key) return;
-
-  if (posthog.__loaded) {
-    posthog.opt_in_capturing({ captureEventName: null });
-    capturePageview();
-    return;
-  }
-
+if (key) {
   posthog.init(key, {
     // Keep ingestion first-party so analytics still works for visitors whose
     // blockers reject direct requests to PostHog.
@@ -60,16 +38,18 @@ export function initializeAnalytics(): void {
     capture_pageview: false,
     capture_pageleave: true,
     autocapture: false,
-    opt_out_persistence_by_default: true,
 
     // The controls contain model configuration, so mask every input value in
     // replay even though the tool has no account or free-form personal data.
     session_recording: { maskAllInputs: true, maskTextSelector: '[data-ph-mask]' },
 
-    loaded: capturePageview,
+    loaded: (ph) => {
+      ph.capture('$pageview', {
+        $current_url: window.location.href,
+        page_name: 'How to Deploy Your Model',
+        pathname: window.location.pathname,
+        surface: 'htdym',
+      });
+    },
   });
-}
-
-export function disableAnalytics(): void {
-  if (posthog.__loaded) posthog.opt_out_capturing();
 }
