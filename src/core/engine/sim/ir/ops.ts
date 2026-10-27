@@ -55,6 +55,15 @@ export interface WeightLoadOp extends OpBase {
   loadFraction: number;
 }
 
+// Reads from host memory over the chip's host link (PCIe/C2C), e.g. an
+// embedding table too large for HBM. Priced on the host link, overlapped
+// like communication since it runs on a copy engine beside the compute.
+export interface HostReadOp extends OpBase {
+  kind: 'host-read';
+  // per-chip bytes this step
+  bytes: number;
+}
+
 // Dependency-only convergence point for branches whose outputs are combined.
 export interface JoinOp extends OpBase {
   kind: 'join';
@@ -98,7 +107,7 @@ export interface Segment<Op = ExpandedOp> {
 
 // What lowering emits, reshards still abstract.
 export type LoweredOp =
-  GemmOp | AttentionOp | WeightLoadOp | JoinOp | ReshardOp | CollectiveOp | P2pOp;
+  GemmOp | AttentionOp | WeightLoadOp | HostReadOp | JoinOp | ReshardOp | CollectiveOp | P2pOp;
 
 // What reshard expansion emits and cost backends consume.
 export type ExpandedOp = Exclude<LoweredOp, ReshardOp>;

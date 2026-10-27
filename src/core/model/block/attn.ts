@@ -58,8 +58,38 @@ export type AttnConfig =
       ropeDtype: Dtype;
       // null for the sliding-only MQA bootstrap layers
       compressionRate: number | null;
-      indexer?: { heads: number; headDim: number; topK: number; cacheDtype: Dtype };
+      indexer?: CompressedIndexer;
+      // Cross-layer sharing (DeepSeek V4.1): the layer reads an earlier
+      // layer's compressed cache instead of compressing its own, so it
+      // stores only its window and carries no compressor weights.
+      sharedCache?: boolean;
+      // Sparse top-k over the compressed entries for a layer with no
+      // indexer of its own (it reuses the last indexer's picks).
+      // Absent = the indexer's topK, or every entry without one.
+      topK?: number;
+      // Stored bytes per KV entry when the kernel packs it differently from
+      // dims x dtype (FlashMLA's 528 B fp8 entry on SM100). Absent = derived.
+      entryBytes?: number;
+      // compressor projections over the residual (KV and gate per series);
+      // absent = V4's 4 for overlapping CSA, 2 for HCA
+      compressorProjections?: number;
     };
+
+export interface CompressedIndexer {
+  heads: number;
+  headDim: number;
+  topK: number;
+  cacheDtype: Dtype;
+  // entries the scorer can reach at most (V4.1's candidate blocks from an
+  // earlier dense pass); absent = every compressed entry
+  scoreSpan?: number;
+  // scores against an earlier layer's indexer keys: no key cache or key
+  // projection of its own
+  sharedCache?: boolean;
+  // keys projected from the compressor's KV latent (V4.1) rather than the
+  // residual with V4's two-series compressor
+  keysFromLatent?: boolean;
+}
 
 export function gqa(opts: {
   N: number;
@@ -138,7 +168,11 @@ export function compressedMqa(opts: {
   ropeDim: number;
   ropeDtype?: Dtype;
   compressionRate?: number;
-  indexer?: { heads: number; headDim: number; topK: number; cacheDtype: Dtype };
+  indexer?: CompressedIndexer;
+  sharedCache?: boolean;
+  topK?: number;
+  entryBytes?: number;
+  compressorProjections?: number;
 }): AttnConfig {
   return {
     kind: opts.kind,
@@ -152,5 +186,9 @@ export function compressedMqa(opts: {
     ropeDtype: opts.ropeDtype ?? 'bf16',
     compressionRate: opts.compressionRate ?? null,
     indexer: opts.indexer,
+    sharedCache: opts.sharedCache,
+    topK: opts.topK,
+    entryBytes: opts.entryBytes,
+    compressorProjections: opts.compressorProjections,
   };
 }

@@ -13,6 +13,9 @@ export function evaluatePrefill<TBackend extends CostBackend>(
   seqs: number,
   mode: 'throughput' | 'ttft',
   opts: EvalOptions<TBackend>,
+  // leading prompt tokens already in the prefix cache: no compute, but the
+  // rest attend over them. Throughput still counts whole prompts.
+  cached = 0,
 ): PrefillEvaluation<TBackend> {
   const { workload, deployment } = input;
   const T = workload.prefillLen;
@@ -53,7 +56,9 @@ export function evaluatePrefill<TBackend extends CostBackend>(
         tokensPerGroup: mode === 'ttft' ? T : (seqs * T) / dpa,
         seqsPerGroup: mode === 'ttft' ? seqs : seqs / dpa,
         ctx: T,
+        cached,
         includeBoundary: pp > 1 && stage.index < stages.length - 1,
+        routingSkew: workload.routingSkew,
       },
       stage,
     ),

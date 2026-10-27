@@ -22,6 +22,15 @@ You give it four things:
   optional role→axis placement. Omit the placement and it searches for the best one.
 - **Workload** — prefill or decode, token count, batch size.
 
+On top of the isolated phases, `src/core/engine/sim/run/serving.ts` prices one
+steady-state serving step: speculative decoding (a k+1-query verify plus the
+model's draft), continuous batching (the chunked prefill of the requests that
+replace finished ones rides in the same step), prefix-cache hits, and the
+engine's per-step token budget. `routingSkew` on the workload prices MoE expert
+imbalance on the hottest EP rank, and `run/disagg.ts` prices prefill/decode
+disaggregation with the KV transfer between pools. `scripts/rank.ts` ranks
+chips under them, and `scripts/sweep.ts` sweeps every placement of one machine.
+
 It lowers that into a graph of costed operations (GEMMs, weight and KV loads,
 collectives), and a cost backend prices the graph to produce a time estimate.
 

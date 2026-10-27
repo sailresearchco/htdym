@@ -566,11 +566,17 @@ function a2aCost(
 test('coalesced a2a ships the expected distinct-shard payload', () => {
   // 8 experts on EP = 4 shards of 2, topK = 2: a shard is missed with
   // probability C(6,2)/C(8,2) = 15/28, so a token reaches 4 * 13/28 =
-  // 13/7 distinct shards vs its 2 expanded copies. Both a2as are linear
-  // in the shipped copies, so the whole bill scales by exactly (13/7) / 2.
+  // 13/7 distinct shards vs its 2 expanded copies. Both are then padded
+  // to the hottest shard's finite-batch share of B = 2048 tokens, mean +
+  // sqrt(2 ln 4) sds: pairs are hypergeometric (mean 1/2, variance
+  // 2 * 1/4 * 3/4 * 6/7), distinct tokens Bernoulli(13/28). Both a2as are
+  // linear in the shipped copies, so the whole bill scales by the ratio.
   const mlp = moeMlp({ experts: 8, topK: 2, expertDim: 512 });
+  const hot = (mean: number, variance: number) =>
+    1 + Math.sqrt(2 * Math.log(4) * variance * 2048) / (2048 * mean);
+  const p = 13 / 28;
   expect(a2aCost(mlp, 'coalesced-a2a').comms / a2aCost(mlp, 'expanded-a2a').comms).toBeCloseTo(
-    13 / 7 / 2,
+    ((13 / 7) * hot(p, p * (1 - p))) / (2 * hot(1 / 2, (2 * 3 * 6) / (4 * 4 * 7))),
     9,
   );
 });

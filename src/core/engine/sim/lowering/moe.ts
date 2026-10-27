@@ -15,6 +15,9 @@ export interface MoeArgs {
   acts: CategoryDtypes;
   // width of the residual stream the block's output reductions land in
   residual: Dtype;
+  // steady-state hottest/mean EP-rank load at large batch (1 = balanced),
+  // see rankImbalance. Absent = 1.
+  routingSkew?: number;
 }
 
 export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
@@ -24,8 +27,20 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
   const ep = roleSize(mesh, 'EP');
   const d = x.type.shape[1];
   const inner = mlp.latentDim || d;
-  // Under uniform routing, an expert is untouched only if every token misses it.
-  const activatedFrac = 1 - Math.pow(1 - mlp.topK / mlp.experts, args.tokensTotal);
+  const skew = args.routingSkew ?? 1;
+
+  // The step waits for the most loaded EP rank, so everything below is
+  // sized for that rank rather than the mean one: its token-expert pairs
+  // (what its GEMMs run) and the tokens it receives and returns over the
+  // a2a. Every rank's slice is padded to the hottest one, which prices
+  // the a2a at the hottest port - the one the collective waits for.
+  const imb = rankImbalance(args.tokensTotal, pairLoad(mlp.experts, mlp.topK, ep), ep, skew);
+
+  // Under uniform routing, an expert is untouched only if every token
+  // misses it. The hottest rank's experts are hit imb times as often,
+  // so it touches (and streams) more of its experts than the mean rank.
+  const hitRate = Math.min(1, (imb * mlp.topK) / mlp.experts);
+  const activatedFrac = 1 - Math.pow(1 - hitRate, args.tokensTotal);
 
   // the small [D, E] router replicates on every rank
   // so each can pick global top-k without gathering logits
@@ -85,13 +100,13 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
       dtype: args.acts.routedExperts,
     }); // [B_dpa, L_tp] -> [B, L]
 
-    // routed view: the B*topK token-expert pairs each chip actually
-    // computes, balanced over the expert shards (no data moves)
+    // routed view: the B*topK token-expert pairs, padded to the hottest
+    // expert shard's share (no data moves)
     const routed = trace.reshape(
       replicated,
-      [args.tokensTotal * mlp.topK, inner],
+      [args.tokensTotal * mlp.topK * imb, inner],
       [roles['EP'], []],
-    ); // [B, L] -> [(B*topK)_ep, L]
+    ); // [B, L] -> [(B*topK*imb)_ep, L]
 
     const expertOut = trace.expertFfn('experts', routed, {
       ff: mlp.expertDim,
@@ -126,8 +141,13 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
     // most once per destination shard and merges each shard's expert
     // outputs before the trip back, so only the expected distinct-shard
     // count crosses the wire while a received token fans out to its
-    // local experts for free.
-    const copies = dispatch === 'expanded-a2a' ? mlp.topK : shardsHit(mlp.experts, mlp.topK, ep);
+    // local experts for free. Either is then padded to what the hottest
+    // shard receives: its pairs, or (coalesced) its distinct tokens.
+    const copies =
+      dispatch === 'expanded-a2a'
+        ? mlp.topK * imb
+        : shardsHit(mlp.experts, mlp.topK, ep) *
+          rankImbalance(args.tokensTotal, tokenLoad(mlp.experts, mlp.topK, ep), ep, skew);
 
     // [B_dpa, L_tp] -> [B_dpa, EP, copies/EP, L_tp]
     const send = trace.reshape(
@@ -142,10 +162,10 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
       extraDeps: [router],
     });
 
-    // [B, EP_ep, copies/EP, L] -> [(B * topK)_ep, L]
+    // [B, EP_ep, copies/EP, L] -> [(B * topK * imb)_ep, L]
     const grouped = trace.reshape(
       dispatched,
-      [args.tokensTotal * mlp.topK, inner],
+      [args.tokensTotal * mlp.topK * imb, inner],
       [roles['EP'], []],
     );
 
@@ -161,9 +181,9 @@ export function lowerMoe(trace: TraceBuilder, x: Val, args: MoeArgs): Val {
         epSharding: roles['EP'],
         activeGroups: (mlp.experts * activatedFrac) / ep,
       },
-    }); // [(B * topK)_ep, L] -> [(B * topK)_ep, L] {U_etp}
+    }); // [(B * topK * imb)_ep, L] -> [(B * topK * imb)_ep, L] {U_etp}
 
-    // [(B * topK)_ep, L] {U_etp} -> [B, EP_ep, copies/EP, L] {U_etp}
+    // [(B * topK * imb)_ep, L] {U_etp} -> [B, EP_ep, copies/EP, L] {U_etp}
     const ungrouped = trace.reshape(
       expertOut,
       [args.tokensTotal, ep, copies / ep, inner],
@@ -225,4 +245,49 @@ function shardsHit(experts: number, topK: number, ep: number): number {
   let miss = 1;
   for (let i = 0; i < topK; i++) miss *= (experts - experts / ep - i) / (experts - i);
   return ep * (1 - miss);
+}
+
+// One token's load on one EP rank, as moments of a per-token draw.
+interface TokenLoad {
+  mean: number;
+  variance: number;
+  // the most one token can put on one rank
+  max: number;
+}
+
+// Pairs: how many of a token's topK distinct experts land on one shard of
+// E/EP experts. Hypergeometric, topK draws from E with E/EP successes.
+function pairLoad(experts: number, topK: number, ep: number): TokenLoad {
+  const p = 1 / ep;
+  const fpc = experts > 1 ? (experts - topK) / (experts - 1) : 0;
+  return { mean: topK * p, variance: topK * p * (1 - p) * fpc, max: Math.min(topK, experts / ep) };
+}
+
+// Tokens: whether a token reaches one shard at all, what a coalesced
+// dispatch ships. Bernoulli with the shardsHit/EP probability.
+function tokenLoad(experts: number, topK: number, ep: number): TokenLoad {
+  const p = shardsHit(experts, topK, ep) / ep;
+  return { mean: p, variance: p * (1 - p), max: 1 };
+}
+
+// Expected hottest/mean EP-rank load for B tokens of per-token `load`.
+// Two sources stack:
+//
+// - routing skew: real routers have hot experts. `skew` is the hottest
+//   rank's steady-state load over the mean at large batch, set by the
+//   caller after any EPLB rebalancing (which is not modelled: the caller
+//   states the post-EPLB skew).
+// - finite batch: a rank's load is a sum of B independent per-token
+//   draws, so it is ~normal with mean B*mean and sd sqrt(B*variance),
+//   and the max of EP such ranks sits about sqrt(2 ln EP) sds above the
+//   mean (the Gaussian extreme-value bound). Relative to the mean that
+//   falls as 1/sqrt(B), which is why small batches suffer more.
+//
+// So hottest ~ skew*B*mean + sqrt(2 ln EP * B*variance), over B*mean,
+// capped where every token puts its most on the hottest rank. Exactly 1
+// at EP = 1, where there is no other rank to be hotter than.
+export function rankImbalance(tokens: number, load: TokenLoad, ep: number, skew: number): number {
+  if (ep <= 1 || load.mean <= 0 || tokens <= 0) return 1;
+  const spread = Math.sqrt(2 * Math.log(ep) * load.variance * tokens) / (tokens * load.mean);
+  return Math.min(skew + spread, load.max / load.mean);
 }

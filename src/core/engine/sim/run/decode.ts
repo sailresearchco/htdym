@@ -57,6 +57,7 @@ export function evaluateDecodeAtBatch<TBackend extends CostBackend>(
         seqsPerGroup: batch / dpa,
         ctx: workload.prefillLen + workload.generateLen / 2,
         includeBoundary: pp > 1 && stage.index < stages.length - 1,
+        routingSkew: workload.routingSkew,
       },
       stage,
     ),

@@ -9,6 +9,7 @@ import { matmulSeconds } from '../src/core/engine/roofline';
 import { PhysAxis } from '../src/core/hardware/topology';
 import { MODEL_PRESETS } from '../src/core/model/models';
 import { DTYPE_BYTES } from '../src/core/model/dtype';
+import { blockRoutedExpertParams } from '../src/core/model/block';
 import { flopsPerPrefillToken, kvBytesPerSeq, weightBytesTotal } from '../src/core/model/utils';
 
 const backend = makeNaiveOpCostSumBackend({ memoryOverlap: 0, commsOverlap: 0 });
@@ -72,8 +73,26 @@ test('every preset conserves the closed-form FLOPs and bytes', () => {
     const emb = m.tiedEmbeddings
       ? 0
       : m.vocab * m.modelDim * DTYPE_BYTES[m.precision.weights.embeddings];
+    // A block with a prefill tail sees only its last tokens, too few to
+    // touch every expert: it streams the fraction they activate.
+    const untouched = m.blocks.reduce(
+      (s, g) =>
+        s +
+        g.repeat *
+          g.pattern.reduce((t, { block: b, count }) => {
+            if (b.prefillTail === undefined || b.mlp.kind !== 'moe') return t;
+            const missed = Math.pow(1 - b.mlp.topK / b.mlp.experts, Math.min(T, b.prefillTail));
+            const bytes =
+              blockRoutedExpertParams(m, b).total * DTYPE_BYTES[m.precision.weights.routedExperts];
+            return t + count * missed * bytes;
+          }, 0),
+      0,
+    );
     const bytes =
-      weightBytesTotal(m) - emb + kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
+      weightBytesTotal(m) -
+      emb -
+      untouched +
+      kvBytesPerSeq(m, DTYPE_BYTES[m.precision.kv], T, 'store');
     const fl = r.cost.busy.compute / ideal,
       by = (r.cost.busy.memory - acts / hbm) / (bytes / hbm);
     expect(fl).toBeCloseTo(1, 9);

@@ -1,6 +1,7 @@
 import { ModelSpec } from '../../../model/models';
 import {
   blockAttnParams,
+  blockEngramParams,
   blockDenseMlpParams,
   blockKvBytes,
   blockKvHeads,
@@ -37,7 +38,7 @@ export function memoryFootprint(
         const n = g.repeat * count;
         weights +=
           (n *
-            (blockAttnParams(m, b).total * B('attention') +
+            ((blockAttnParams(m, b).total + blockEngramParams(b)) * B('attention') +
               (blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)) * B('denseMlp') +
               blockSharedExpertParams(m, b) * B('sharedExperts'))) /
           tp;

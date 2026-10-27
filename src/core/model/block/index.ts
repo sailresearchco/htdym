@@ -7,6 +7,15 @@ import type { MlpConfig } from './mlp';
 export interface BlockSpec {
   attn: AttnConfig;
   mlp: MlpConfig;
+  // An n-gram memory read into the residual before attention (DeepSeek
+  // V4.1's Engram): each token hashes `lookups` rows of `rowBytes` out of
+  // tables too large for HBM, kept in host memory and read over the host
+  // link, then projects them (projIn -> projOut) and gates them in.
+  engram?: { lookups: number; rowBytes: number; projIn: number; projOut: number };
+  // Prefill runs this block on only each prompt's last `prefillTail`
+  // tokens: no later token reads anything it stores beyond its window
+  // (V4.1's layers past the last cache source, vLLM's bounded replay).
+  prefillTail?: number;
 }
 
 // Consecutive copies of one block inside a group's pattern.
@@ -90,15 +99,18 @@ export function blockAttnParams(
   const kv = m.modelDim * H;
 
   let compressor = 0;
-  if (a.compressionRate !== null) {
+  if (a.compressionRate !== null && !a.sharedCache) {
     // KV and gate projections. CSA emits two overlapping series; HCA one.
-    compressor += (a.kind === 'csa' ? 4 : 2) * m.modelDim * H;
+    compressor += (a.compressorProjections ?? (a.kind === 'csa' ? 4 : 2)) * m.modelDim * H;
   }
   if (a.indexer) {
     const i = a.indexer;
-    // Two-series indexer KV + gate projections, query up-projection from
-    // the shared latent, and the per-head score weighting projection.
-    compressor += 4 * m.modelDim * i.headDim + a.qRank * i.heads * i.headDim + m.modelDim * i.heads;
+    // Indexer keys (V4: two-series KV + gate projections off the residual;
+    // V4.1: one projection off the compressor latent, only where the key
+    // cache lives), query up-projection from the shared latent, and the
+    // per-head score weighting projection.
+    const keys = i.sharedCache ? 0 : i.keysFromLatent ? H * i.headDim : 4 * m.modelDim * i.headDim;
+    compressor += keys + a.qRank * i.heads * i.headDim + m.modelDim * i.heads;
   }
 
   // Per-group N*H/g -> outputRank, followed by g*outputRank -> D.
@@ -171,12 +183,22 @@ export function blockAttnFlopsDecodeParts(b: BlockSpec, ctx: number): AttnFlopPa
 
   const a = b.attn;
   const compressed = a.compressionRate === null ? 0 : ctx / a.compressionRate;
-  const longSpan = a.indexer ? Math.min(compressed, a.indexer.topK) : compressed;
+  const cap = sparseTopK(a);
+  const longSpan = cap === undefined ? compressed : Math.min(compressed, cap);
   const coreSpan = Math.min(ctx, a.window) + longSpan;
+  const scored = a.indexer ? Math.min(compressed, a.indexer.scoreSpan ?? Infinity) : 0;
   return {
     core: 2 * coreSpan * N * (a.headDim + a.headDim),
-    indexer: a.indexer ? 2 * compressed * a.indexer.heads * a.indexer.headDim : 0,
+    indexer: a.indexer ? 2 * scored * a.indexer.heads * a.indexer.headDim : 0,
   };
+}
+
+type CompressedAttn = Extract<AttnConfig, { kind: 'mqa' | 'csa' | 'hca' }>;
+
+// The compressed entries one query attends: its indexer's picks, or the
+// picks it reuses from an earlier one. Undefined = all of them.
+function sparseTopK(a: CompressedAttn): number | undefined {
+  return a.indexer?.topK ?? a.topK;
 }
 
 function blockAttnFlopsDecode(b: BlockSpec, ctx: number): number {
@@ -218,9 +240,11 @@ export function blockAttnFlopsPrefillParts(b: BlockSpec, T: number): AttnFlopPar
   const a = b.attn;
   const localPairs = causalWindowPairs(T, a.window);
   const longPairs =
-    a.compressionRate === null ? 0 : compressedPairs(T, a.compressionRate, a.indexer?.topK);
+    a.compressionRate === null ? 0 : compressedPairs(T, a.compressionRate, sparseTopK(a));
   const indexPairs =
-    a.compressionRate !== null && a.indexer ? compressedPairs(T, a.compressionRate) : 0;
+    a.compressionRate !== null && a.indexer
+      ? compressedPairs(T, a.compressionRate, a.indexer.scoreSpan)
+      : 0;
   return {
     core: 2 * (localPairs + longPairs) * N * (H + H),
     indexer: a.indexer ? 2 * indexPairs * a.indexer.heads * a.indexer.headDim : 0,
@@ -262,19 +286,34 @@ export function blockKvBytesParts(
   }
 
   const a = b.attn;
-  const entryBytes = (a.headDim - a.ropeDim) * kvBytes + a.ropeDim * DTYPE_BYTES[a.ropeDtype];
+  const entryBytes =
+    a.entryBytes ?? (a.headDim - a.ropeDim) * kvBytes + a.ropeDim * DTYPE_BYTES[a.ropeDtype];
   const localEntries = Math.min(len, a.window);
   const compressedEntries = a.compressionRate === null ? 0 : len / a.compressionRate;
+  const cap = sparseTopK(a);
+  // a layer sharing another's cache reads from it but stores nothing there
   const longEntries =
-    access === 'read' && a.indexer
-      ? Math.min(compressedEntries, a.indexer.topK)
-      : compressedEntries;
-  return {
-    core: (localEntries + longEntries) * entryBytes,
-    indexer: a.indexer
-      ? compressedEntries * a.indexer.headDim * DTYPE_BYTES[a.indexer.cacheDtype]
-      : 0,
-  };
+    access === 'read'
+      ? cap === undefined
+        ? compressedEntries
+        : Math.min(compressedEntries, cap)
+      : a.sharedCache
+        ? 0
+        : compressedEntries;
+  const keyBytes = a.indexer ? a.indexer.headDim * DTYPE_BYTES[a.indexer.cacheDtype] : 0;
+  const indexEntries = !a.indexer
+    ? 0
+    : access === 'read'
+      ? Math.min(compressedEntries, a.indexer.scoreSpan ?? Infinity)
+      : a.indexer.sharedCache
+        ? 0
+        : compressedEntries;
+  return { core: (localEntries + longEntries) * entryBytes, indexer: indexEntries * keyBytes };
+}
+
+// Engram projection parameters of one block (its tables live in host memory).
+export function blockEngramParams(b: BlockSpec): number {
+  return b.engram ? b.engram.projIn * b.engram.projOut : 0;
 }
 
 export function blockKvBytes(

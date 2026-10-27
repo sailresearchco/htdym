@@ -284,6 +284,17 @@ export class TraceBuilder {
     return this.push({ kind: 'attention', label, out, ...rest }, [x], rest.dtype);
   }
 
+  // rows read from host memory: `bytes` per chip over the host link
+  hostRead(
+    label: string,
+    shape: number[],
+    sharding: MeshAxis[][],
+    bytes: number,
+    dtype: Dtype,
+  ): Val {
+    return this.push({ kind: 'host-read', label, out: this.tt(shape, sharding), bytes }, [], dtype);
+  }
+
   // dependency-only convergence of branches that must agree in type but
   // not in width: `dtype` states the width their sum lands in
   join(label: string, vals: Val[], dtype: Dtype): Val {

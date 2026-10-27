@@ -15,6 +15,13 @@ export interface SimInput {
     prefillLen: number;
     // decode (generation) length S, tokens
     generateLen: number;
+    // MoE routing skew: the hottest EP rank's token-expert load over the
+    // mean rank's at large batch (1 = balanced, absent = 1). A property of
+    // the router on this traffic, not of the sharding, so it lives with
+    // the workload and every searched deployment sees the same one. State
+    // it after any EPLB rebalancing; the finite-batch imbalance on top is
+    // derived (see rankImbalance in lowering/moe.ts).
+    routingSkew?: number;
   };
 }
 

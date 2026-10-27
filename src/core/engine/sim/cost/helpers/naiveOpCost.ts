@@ -1,7 +1,7 @@
 import { collectiveCost } from './collectives';
 import { ExpandedOp } from '../../ir/ops';
 import { localElems, shardWays } from '../../ir/tensors';
-import { peakFlops } from '../../../../hardware/chips';
+import { hostBandwidth, peakFlops } from '../../../../hardware/chips';
 import type { MmaShape } from '../../../../hardware/mma';
 import type { HardwareResource } from '../../../surface/api';
 import type { Deployment } from '../../../surface/deploy';
@@ -69,6 +69,8 @@ export function naiveOpCost(op: ExpandedOp, deployment: Deployment): OpCost {
         memory: (localElems(op.out, dims) * DTYPE_BYTES[op.dtype] * op.loadFraction) / hbm,
         comms: 0,
       };
+    case 'host-read':
+      return { compute: 0, memory: 0, comms: op.bytes / hostBandwidth(chip) };
     case 'join':
       return zero;
     case 'collective':

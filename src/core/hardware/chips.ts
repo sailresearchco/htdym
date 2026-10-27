@@ -41,6 +41,9 @@ export interface ChipSpec {
   // Rental $/chip-hour, rounded so each price ÷ the H100's 1.8 lands on a
   // clean public multiplier (the UI quotes prices relative to the H100).
   costPerHour?: number;
+  // One-way bytes/s the chip sustains reading pinned host memory (its
+  // PCIe or C2C link). Absent = HOST_LINK_DEFAULT.
+  hostBandwidth?: number;
   // Thermal design power per chip in watts, the per-kW efficiency view's
   // denominator (quoted relative to the H100 the way prices are). Vendor
   // datasheet figures where published, credible third-party estimates
@@ -57,6 +60,14 @@ export interface ChipSpec {
   // Arithmetic paths by resolved compute dtype, shared by dense/grouped GEMMs.
   // Uncharacterized paths use the explicit APPROXIMATE_MMA table.
   mmaShapes: MmaShapes;
+}
+
+// A PCIe Gen5 x16 link's realized one-way rate (64 GB/s raw), which is
+// what an HGX GPU gets from a Gen5 host CPU even when the GPU side is Gen6.
+export const HOST_LINK_DEFAULT = 55e9;
+
+export function hostBandwidth(chip: ChipSpec): number {
+  return chip.hostBandwidth ?? HOST_LINK_DEFAULT;
 }
 
 // What a format degrades to when a chip has no matmul unit for it: each names

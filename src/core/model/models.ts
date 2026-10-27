@@ -1,4 +1,4 @@
-import type { BlockGroup } from './block';
+import type { BlockGroup, BlockSpec } from './block';
 import { ALL_BF16, BF16_ALL, FP8_ALL, type PrecisionSpec } from './dtype';
 import { compressedMqa, gqa, linearAttn, mla } from './block/attn';
 import { denseMlp, moeMlp } from './block/mlp';
@@ -23,6 +23,18 @@ export interface ModelSpec {
   // are a handful of vectors per layer and are omitted like the conv taps.
   // Absent = 1, an ordinary single residual stream.
   residualStreams?: number;
+  // The draft model a speculative method runs beside this one (DSpark,
+  // MTP heads): priced only when serving speculatively.
+  draft?: DraftSpec;
+}
+
+// A draft model: its own layers (it reuses the target's embeddings and LM
+// head), how many sequential passes it takes to propose one step's tokens,
+// and how many query tokens per sequence each pass carries.
+export interface DraftSpec {
+  blocks: BlockGroup[];
+  passes: number;
+  tokensPerPass: number;
 }
 
 // Kimi K3 interleaves its two attention variants across several block
@@ -73,6 +85,84 @@ const v4ProCsa = compressedMqa({
 });
 const v4ProHca = compressedMqa({ ...v4ProAttn, kind: 'hca', compressionRate: 128 });
 const v4ProMoe = moeMlp({ experts: 384, topK: 6, expertDim: 3072, sharedExperts: 1 });
+
+// DeepSeek V4.1 Flash, from the 1017 checkpoint's text_config and vLLM
+// 0.32's deepseek_v41 model. Every layer keeps its own 128-token window
+// (528 B packed FP8 entries on SM100). Layers 2-19 compress pairs of
+// tokens and 20-39 keep a full-length compressed series, but only layers
+// 2, 8, 14 and 20 store one: the others read the last such source's cache.
+// Indexers (32 heads) on 2, 8, 14, 20 own key caches; those on 24-36 score
+// layer 20's keys, restricted to the 16,384 candidate positions layer 20's
+// dense pass picks (indexer_sparse_logits, as deployed). Layers without an
+// indexer reuse the last one's top-512.
+const v41Attn = {
+  N: 64,
+  H: 512,
+  qRank: 1280,
+  outputGroups: 8,
+  outputRank: 1024,
+  window: 128,
+  ropeDim: 64,
+  entryBytes: 528,
+};
+const v41Indexer = {
+  heads: 32,
+  headDim: 128,
+  topK: 512,
+  cacheDtype: 'mxfp4',
+  keysFromLatent: true,
+} as const;
+const v41Swa = compressedMqa({ ...v41Attn, kind: 'mqa' });
+const v41PairSource = compressedMqa({
+  ...v41Attn,
+  kind: 'csa',
+  compressionRate: 2,
+  compressorProjections: 2,
+  indexer: v41Indexer,
+});
+const v41Pair = compressedMqa({
+  ...v41Attn,
+  kind: 'csa',
+  compressionRate: 2,
+  sharedCache: true,
+  topK: 512,
+});
+const v41FullSource = compressedMqa({
+  ...v41Attn,
+  kind: 'csa',
+  compressionRate: 1,
+  compressorProjections: 1,
+  indexer: v41Indexer,
+});
+const v41FullIndexed = compressedMqa({
+  ...v41Attn,
+  kind: 'csa',
+  compressionRate: 1,
+  sharedCache: true,
+  indexer: { ...v41Indexer, sharedCache: true, scoreSpan: 2048 * 8 },
+});
+const v41Full = compressedMqa({
+  ...v41Attn,
+  kind: 'csa',
+  compressionRate: 1,
+  sharedCache: true,
+  topK: 512,
+});
+const v41Moe = moeMlp({ experts: 384, topK: 6, expertDim: 2304, sharedExperts: 1 });
+// Engram on layers 1 and 14: 3 n-gram orders x 8 heads hash 24 rows of
+// 256 FP8 values plus scales (264 B), ~101 GB of table per layer held in
+// pinned host memory, projected 6144 -> 5 x 5120 (a key per residual
+// stream and one shared value).
+const v41Engram = { lookups: 24, rowBytes: 264, projIn: 24 * 256, projOut: 5 * 5120 };
+// Past layer 20 nothing a later token reads lives outside the window (the
+// compressed cache they read is layer 20's, written from its input), so
+// prefill runs layers 21-39 on each prompt's last 128 tokens only. vLLM
+// also trims layer 20 to its compressor; here it runs whole.
+const v41Tail = 128;
+const one = (block: BlockSpec, count = 1): BlockGroup => ({
+  pattern: [{ block, count }],
+  repeat: 1,
+});
 
 export const MODEL_PRESETS: ModelSpec[] = [
   {
@@ -153,6 +243,74 @@ export const MODEL_PRESETS: ModelSpec[] = [
         mlp: v4Moe,
       }),
     ],
+  },
+  {
+    name: 'DeepSeek V4.1 Flash 1017 MXFP4/MXFP8',
+    // https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/main/config.json
+    modelDim: 5120,
+    vocab: 129280,
+    tiedEmbeddings: false,
+    precision: {
+      // [32, 32]-block FP8 with E8M0 scales runs as MXFP8 weights and
+      // activations; routed experts are MXFP4. Router and embeddings bf16.
+      weights: {
+        attention: 'mxfp8',
+        denseMlp: 'mxfp8',
+        sharedExperts: 'mxfp8',
+        routedExperts: 'mxfp4',
+        router: 'bf16',
+        embeddings: 'bf16',
+      },
+      activations: {
+        attention: 'mxfp8',
+        denseMlp: 'mxfp8',
+        sharedExperts: 'mxfp8',
+        routedExperts: 'mxfp8',
+        router: 'bf16',
+        embeddings: 'bf16',
+      },
+      residual: 'bf16',
+      kv: 'fp8',
+      indexer: 'fp4',
+    },
+    residualStreams: 4,
+    // No hash-routed layers in V4.1: every layer is a learned-router MoE.
+    blocks: [
+      one({ attn: v41Swa, mlp: v41Moe }),
+      one({ attn: v41Swa, mlp: v41Moe, engram: v41Engram }),
+      one({ attn: v41PairSource, mlp: v41Moe }),
+      one({ attn: v41Pair, mlp: v41Moe }, 5),
+      one({ attn: v41PairSource, mlp: v41Moe }),
+      one({ attn: v41Pair, mlp: v41Moe }, 5),
+      one({ attn: v41PairSource, mlp: v41Moe, engram: v41Engram }),
+      one({ attn: v41Pair, mlp: v41Moe }, 5),
+      one({ attn: v41FullSource, mlp: v41Moe }),
+      {
+        pattern: [
+          { block: { attn: v41Full, mlp: v41Moe, prefillTail: v41Tail }, count: 3 },
+          { block: { attn: v41FullIndexed, mlp: v41Moe, prefillTail: v41Tail }, count: 1 },
+        ],
+        repeat: 4,
+      },
+      one({ attn: v41Full, mlp: v41Moe, prefillTail: v41Tail }, 3),
+    ],
+    // DSpark: three window-only layers with a 128-expert top-3 MoE, fed
+    // the target's layers 37-39, draft all 5 tokens of a block in one
+    // parallel pass. Its input projection and low-rank Markov head are a
+    // few percent of a pass and are not priced.
+    draft: {
+      blocks: [
+        one(
+          {
+            attn: v41Swa,
+            mlp: moeMlp({ experts: 128, topK: 3, expertDim: 2304, sharedExperts: 1 }),
+          },
+          3,
+        ),
+      ],
+      passes: 1,
+      tokensPerPass: 5,
+    },
   },
   {
     name: 'DeepSeek V4 Pro MXFP4/FP8',

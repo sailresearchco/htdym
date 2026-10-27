@@ -52,6 +52,15 @@ export function validateInput(input: SimInput): Diagnostic[] {
       message: `no subset of this placement's TP dims multiplies to DCP = ${dcp}`,
     });
 
+  // the hottest rank cannot carry less than the mean one
+  const skew = workload.routingSkew ?? 1;
+  if (!(skew >= 1))
+    diags.push({
+      severity: 'error',
+      code: 'routing-skew-invalid',
+      message: `routing skew ${skew} is below 1: it is the hottest EP rank's load over the mean`,
+    });
+
   // If a chip doesn't support doing matmuls in one of a model's activation
   // type, we'll do it in the next-widest type that the chip does support.
   const chip = deployment.chip;

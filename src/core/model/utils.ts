@@ -3,6 +3,7 @@ import {
   blockAttnFlopsDecodeParts,
   blockAttnFlopsPrefillParts,
   blockAttnParams,
+  blockEngramParams,
   blockDenseMlpParams,
   blockKvBytes,
   blockKvHeads,
@@ -44,7 +45,8 @@ export function weightBytesTotal(m: ModelSpec): number {
       (blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)) * B(w.denseMlp) +
       blockSharedExpertParams(m, b) * B(w.sharedExperts) +
       blockRoutedExpertParams(m, b).total * B(w.routedExperts) +
-      blockRouterParams(m, b) * B(w.router),
+      blockRouterParams(m, b) * B(w.router) +
+      blockEngramParams(b) * B(w.attention),
   );
   const embeddingCopies = m.tiedEmbeddings ? 1 : 2;
   return blockBytes + embeddingCopies * m.vocab * m.modelDim * B(w.embeddings);
@@ -103,27 +105,32 @@ function addFlops(out: FlopsByWidth, d: Dtype, flops: number): void {
 
 // Matmul FLOPs one token touches, bucketed by each category's activation
 // width. Sums to 2 x activeParams when a model runs one width throughout.
-function matmulFlopsByWidth(m: ModelSpec): FlopsByWidth {
+// `share` is the fraction of tokens each block sees (prefill tails).
+function matmulFlopsByWidth(m: ModelSpec, share: (b: BlockSpec) => number = () => 1): FlopsByWidth {
   const a = m.precision.activations;
   const out: FlopsByWidth = new Map();
   const add = (d: Dtype, params: number) => addFlops(out, d, 2 * params);
+  const sum = (f: (b: BlockSpec) => number) => sumBlocks(m, (b) => share(b) * f(b));
 
-  add(a.attention, totalAttnParams(m));
+  add(
+    a.attention,
+    sum((b) => blockAttnParams(m, b).total + blockEngramParams(b)),
+  );
   add(
     a.denseMlp,
-    sumBlocks(m, (b) => blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)),
+    sum((b) => blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)),
   );
   add(
     a.sharedExperts,
-    sumBlocks(m, (b) => blockSharedExpertParams(m, b)),
+    sum((b) => blockSharedExpertParams(m, b)),
   );
   add(
     a.router,
-    sumBlocks(m, (b) => blockRouterParams(m, b)),
+    sum((b) => blockRouterParams(m, b)),
   );
   add(
     a.routedExperts,
-    sumBlocks(m, (b) => blockRoutedExpertParams(m, b).active),
+    sum((b) => blockRoutedExpertParams(m, b).active),
   );
   add(a.embeddings, m.vocab * m.modelDim);
   return out;
@@ -141,11 +148,21 @@ export function flopsPerDecodeToken(m: ModelSpec, ctx: number): FlopsByWidth {
 }
 
 // Average per-token FLOPs to prefill a sequence of length T (matmuls + attention).
+// A block with a prefill tail runs only each prompt's last tokens, which
+// still attend over everything before them.
 export function flopsPerPrefillToken(m: ModelSpec, T: number): FlopsByWidth {
-  const out = matmulFlopsByWidth(m);
+  const start = (b: BlockSpec) =>
+    b.prefillTail === undefined ? 0 : Math.max(0, T - b.prefillTail);
+  const out = matmulFlopsByWidth(m, (b) => (T - start(b)) / T);
   const attn = m.precision.activations.attention;
-  const core = sumBlocks(m, (b) => blockAttnFlopsPrefillParts(b, T).core) / T;
-  const indexer = sumBlocks(m, (b) => blockAttnFlopsPrefillParts(b, T).indexer) / T;
+  const parts = (b: BlockSpec) => {
+    const full = blockAttnFlopsPrefillParts(b, T);
+    if (start(b) === 0) return full;
+    const skipped = blockAttnFlopsPrefillParts(b, start(b));
+    return { core: full.core - skipped.core, indexer: full.indexer - skipped.indexer };
+  };
+  const core = sumBlocks(m, (b) => parts(b).core) / T;
+  const indexer = sumBlocks(m, (b) => parts(b).indexer) / T;
   addFlops(out, attn, core);
   addFlops(out, m.precision.indexer ?? attn, indexer);
   return out;
@@ -188,4 +205,39 @@ export function minQueryHeads(m: ModelSpec): number {
 export function minKvHeads(m: ModelSpec): number {
   const blocks = uniqueBlocks(m);
   return blocks.length ? Math.min(...blocks.map(blockKvHeads)) : 0;
+}
+
+// Whether an even pp-way layer split (partitionIntoStages' rule) puts a
+// layer on a different stage from the earlier layer whose compressed KV
+// or indexer keys it reads (V4.1's cross-layer sharing). Such a stage
+// would read a cache it neither holds nor receives.
+export function ppSplitsSharedCache(m: ModelSpec, pp: number): boolean {
+  if (pp <= 1) return false;
+  const layers = m.blocks
+    .flatMap((g) =>
+      Array.from({ length: g.repeat }, () =>
+        g.pattern.flatMap((r) => Array(r.count).fill(r.block)),
+      ),
+    )
+    .flat() as BlockSpec[];
+  const base = Math.floor(layers.length / pp);
+  const extra = layers.length % pp;
+  const stageOf: number[] = [];
+  for (let s = 0; s < pp; s++) for (let i = 0; i < base + (s < extra ? 1 : 0); i++) stageOf.push(s);
+
+  let kvSource = -1;
+  let keySource = -1;
+  for (const [i, b] of layers.entries()) {
+    const a = b.attn;
+    if (a.kind !== 'mqa' && a.kind !== 'csa' && a.kind !== 'hca') continue;
+    if (a.compressionRate !== null) {
+      if (!a.sharedCache) kvSource = i;
+      else if (kvSource < 0 || stageOf[kvSource] !== stageOf[i]) return true;
+    }
+    if (a.indexer) {
+      if (!a.indexer.sharedCache) keySource = i;
+      else if (keySource < 0 || stageOf[keySource] !== stageOf[i]) return true;
+    }
+  }
+  return false;
 }
