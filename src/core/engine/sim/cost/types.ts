@@ -24,8 +24,8 @@ export interface BoundBackend {
   // caches are shared across them. Prefix with the backend's name so
   // different backends never collide. A backend whose collective prices
   // are not a pure function of the context (e.g. a stateful simulator)
-  // must mint a unique hash per bind - its plans then never share, at
-  // the cost of cache entries living until the process ends.
+  // must mint a unique hash per bind - its plans then never share, and
+  // its namespaces age out of the planner's bounded cache.
   priceCollectiveHash: string;
   priceTrace(trace: Segment[]): TraceCost;
   priceCollective(

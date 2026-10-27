@@ -4,6 +4,7 @@ import { BoundBackend } from '../cost/types';
 import { DTYPE_BYTES } from '../../../model/dtype';
 import type { Mesh } from '../../surface/deploy';
 import { subsets } from '../../misc/combinatorics';
+import { BoundedCache } from '../../misc/boundedCache';
 
 // A collective as the planner sees it: layout moves only. The wire format is
 // the reshard's business, added when the winning plan is wired in.
@@ -64,8 +65,72 @@ export function expandReshards(
 }
 
 // plans cached under the backend's declared pricing hash, so every bind
-// that prices alike shares them
-const planCache = new Map<string, Map<string, ReturnType<typeof planReshard>>>();
+// that prices alike shares them. Both levels are bounded: a sweep moves
+// through meshes and batch shapes and rarely returns to old ones, so the
+// oldest namespaces and plans are dropped
+const planCache = new BoundedCache<string, BoundedCache<string, ReturnType<typeof planReshard>>>(
+  16,
+);
+const PLANS_PER_NAMESPACE = 8192;
+
+// One layout a reshard toward some destination can pass through, and
+// the single rewrites out of it. Rewrites read the layout, never the
+// shape, so one graph per (destination layout, mesh dims) serves every
+// shape, and a plan for a new shape only re-prices its edges.
+interface LayoutNode {
+  sharding: MeshAxis[][];
+  unreduced: MeshAxis[];
+  // order-insensitive identity, what Dijkstra settles by
+  key: string;
+  // the rewrites out of it, as parallel lists: what each one runs (null
+  // for a free slice) and the layout it lands on
+  edges?: { collective: (CollectiveDesc | null)[]; next: LayoutNode[] };
+}
+type CollectiveDesc = Pick<PlannedCollective, 'variant' | 'label' | 'axes'>;
+// Graphs are kept under a budget of layouts, oldest graph out first: a
+// sweep moves on to new destination layouts tuple by tuple, and a large
+// mesh's graphs run to hundreds of thousands of layouts
+interface LayoutGraph {
+  nodes: Map<string, LayoutNode>;
+  evicted: boolean;
+}
+const graphCache = new Map<string, LayoutGraph>();
+const GRAPH_LAYOUT_BUDGET = 100_000;
+let graphLayouts = 0;
+function layoutGraph(key: string): LayoutGraph {
+  let g = graphCache.get(key);
+  if (!g) graphCache.set(key, (g = { nodes: new Map(), evicted: false }));
+  return g;
+}
+function addLayout(g: LayoutGraph, k: string, n: LayoutNode) {
+  g.nodes.set(k, n);
+  if (g.evicted) return;
+  graphLayouts++;
+  for (const [key, old] of graphCache) {
+    if (graphLayouts <= GRAPH_LAYOUT_BUDGET) break;
+    graphCache.delete(key);
+    old.evicted = true;
+    graphLayouts -= old.nodes.size;
+  }
+}
+// graphs repeat the same few hundred collectives across hundreds of
+// thousands of edges, so each is stored once
+const descs = new Map<string, CollectiveDesc>();
+const descOf = ({ variant, label, axes }: CollectiveDesc): CollectiveDesc => {
+  const k = `${variant} ${axes.join(' ')}`;
+  let d = descs.get(k);
+  if (!d) descs.set(k, (d = { variant, label, axes }));
+  return d;
+};
+
+// a layout spelled exactly, axis order included
+const layoutStr = (t: Pick<TensorType, 'sharding' | 'unreduced'>) =>
+  t.sharding.map((a) => a.join('.')).join(';') + '#' + t.unreduced.join('.');
+// sharding and unreduced are sets, so key layouts order-insensitively
+const layoutKey = (t: Pick<TensorType, 'sharding' | 'unreduced'>) =>
+  t.sharding.map((a) => [...a].sort().join(',')).join(';') +
+  '#' +
+  [...t.unreduced].sort().join(',');
 
 // The cheapest sequence of concrete collectives realizing src -> dst:
 // Dijkstra over layout space, where a node is a layout, an edge is one
@@ -87,63 +152,146 @@ export function planReshard(
     throw new Error(`reshard changes the tensor shape`);
 
   let cache = hash === undefined ? undefined : planCache.get(hash);
-  if (hash !== undefined && !cache) planCache.set(hash, (cache = new Map()));
-  const layoutStr = (t: TensorType) =>
-    t.sharding.map((a) => a.join('.')).join(';') + '#' + t.unreduced.join('.');
+  if (hash !== undefined && !cache)
+    planCache.set(hash, (cache = new BoundedCache(PLANS_PER_NAMESPACE)));
   const memoKey = `${src.shape.join(',')}|${layoutStr(src)}|${layoutStr(dst)}|${names.join('.')}|${elemBytes}`;
   const hit = cache?.get(memoKey);
   if (hit) return hit;
 
-  // sharding and unreduced are sets, so key layouts order-insensitively
-  const layoutKey = (t: TensorType) =>
-    t.sharding.map((a) => [...a].sort().join(',')).join(';') +
-    '#' +
-    [...t.unreduced].sort().join(',');
-
   const target = layoutKey(dst);
 
+  // the layouts this reshard can pass through, shared by every shape
+  const ctxKey = `${layoutStr(dst)}|${names.join('.')}`;
+  const graph = layoutGraph(ctxKey);
+  const nodeOf = (t: TensorType): LayoutNode => {
+    const k = layoutStr(t);
+    let n = graph.nodes.get(k);
+    if (!n)
+      addLayout(
+        graph,
+        k,
+        (n = { sharding: t.sharding, unreduced: t.unreduced, key: layoutKey(t) }),
+      );
+    return n;
+  };
+  // this shape's tensor at each layout the search settles
+  const types = new Map<LayoutNode, TensorType>();
+  const typeOf = (n: LayoutNode): TensorType => {
+    let t = types.get(n);
+    if (!t) types.set(n, (t = tt(src.shape, n.sharding, n.unreduced)));
+    return t;
+  };
+  const start = nodeOf(src);
+  types.set(start, src);
+
   // the cheapest known way to reach each layout seen so far
-  type Node = { time: number; collectives: PlannedCollective[]; type: TensorType };
-  const best = new Map<string, Node>([[layoutKey(src), { time: 0, collectives: [], type: src }]]);
+  type Step = { from: LayoutNode; to: LayoutNode; collective: CollectiveDesc };
+  // `order` is when the layout was first reached: ties settle first-come
+  type Node = { time: number; steps: Step[]; node: LayoutNode; order: number };
+  const best = new Map<string, Node>();
   const done = new Set<string>();
+  const frontier = new Frontier<Node>();
+  const reach = (key: string, n: Omit<Node, 'order'>) => {
+    const node = { ...n, order: best.get(key)?.order ?? best.size };
+    best.set(key, node);
+    frontier.push(node);
+  };
+  reach(start.key, { time: 0, steps: [], node: start });
 
   for (;;) {
-    // settle the cheapest unvisited layout (the space is tiny, so a linear scan beats a priority queue)
-    let cur: Node | null = null;
-    let curKey = '';
-    for (const [k, v] of best)
-      if (!done.has(k) && (!cur || v.time < cur.time)) [cur, curKey] = [v, k];
+    // settle the cheapest unvisited layout, skipping entries a cheaper
+    // way to the same layout has since replaced
+    let cur: Node | undefined;
+    while ((cur = frontier.pop()) && (done.has(cur.node.key) || best.get(cur.node.key) !== cur));
 
     // every reachable layout is settled, so dst was never reachable
     if (!cur) throw new Error(`reshard has no legal path`);
+    const curKey = cur.node.key;
 
     // success!
     if (curKey === target) {
-      const plan = { time: cur.time, collectives: cur.collectives };
+      const plan = {
+        time: cur.time,
+        collectives: cur.steps.map(({ from, to, collective }): PlannedCollective => ({
+          kind: 'collective',
+          ...collective,
+          x: typeOf(from),
+          out: typeOf(to),
+        })),
+      };
       cache?.set(memoKey, plan);
       return plan;
     }
 
     done.add(curKey);
 
-    // relax: keep whichever way to each neighboring layout is cheaper
-    for (const rewrite of rewrites(cur.type, dst, names)) {
-      const [collective, next] = 'kind' in rewrite ? [rewrite, rewrite.out] : [null, rewrite];
-      const nextKey = layoutKey(next);
+    // relax: keep whichever way to each neighboring layout is cheaper.
+    // A layout's rewrites depend on its sharding alone, so they are
+    // enumerated once per layout and only priced per shape
+    const t = typeOf(cur.node);
+    if (!cur.node.edges) {
+      const edges: NonNullable<LayoutNode['edges']> = { collective: [], next: [] };
+      for (const rewrite of rewrites(t, dst, names)) {
+        const isCollective = 'kind' in rewrite;
+        edges.collective.push(isCollective ? descOf(rewrite) : null);
+        edges.next.push(nodeOf(isCollective ? rewrite.out : rewrite));
+      }
+      cur.node.edges = edges;
+    }
+    const { collective: collectives, next: nexts } = cur.node.edges;
+    for (let e = 0; e < nexts.length; e++) {
+      const [collective, next] = [collectives[e], nexts[e]];
+      const nextKey = next.key;
 
-      const cost = collective
-        ? pricer(collective.variant, collective.axes, collective.x, elemBytes)
-        : 0;
+      const cost = collective ? pricer(collective.variant, collective.axes, t, elemBytes) : 0;
       const time = cur.time + cost;
 
       if (best.has(nextKey) && best.get(nextKey)!.time <= time) continue;
 
-      best.set(nextKey, {
-        time,
-        type: next,
-        collectives: collective ? [...cur.collectives, collective] : cur.collectives,
-      });
+      // a slice moves no data, so it adds no step: the next collective
+      // simply starts from the sliced layout
+      const steps = collective
+        ? [...cur.steps, { from: cur.node, to: next, collective }]
+        : cur.steps;
+      reach(nextKey, { time, node: next, steps });
     }
+  }
+}
+
+// A binary min-heap on (time, order): the cheapest layout, and among
+// equally cheap ones the earliest reached.
+class Frontier<T extends { time: number; order: number }> {
+  private heap: T[] = [];
+  private static less(a: { time: number; order: number }, b: { time: number; order: number }) {
+    return a.time < b.time || (a.time === b.time && a.order < b.order);
+  }
+  push(x: T) {
+    const h = this.heap;
+    let i = h.push(x) - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (!Frontier.less(h[i], h[p])) break;
+      [h[i], h[p]] = [h[p], h[i]];
+      i = p;
+    }
+  }
+  pop(): T | undefined {
+    const h = this.heap;
+    const top = h[0];
+    const last = h.pop();
+    if (h.length && last) {
+      h[0] = last;
+      for (let i = 0; ;) {
+        const [l, r] = [2 * i + 1, 2 * i + 2];
+        let m = i;
+        if (l < h.length && Frontier.less(h[l], h[m])) m = l;
+        if (r < h.length && Frontier.less(h[r], h[m])) m = r;
+        if (m === i) break;
+        [h[i], h[m]] = [h[m], h[i]];
+        i = m;
+      }
+    }
+    return top;
   }
 }
 

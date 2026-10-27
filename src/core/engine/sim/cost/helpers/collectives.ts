@@ -122,9 +122,9 @@ function stagedTime(kind: CollectiveKind, order: CommChannel[], bytes: number): 
       // then gather the reduced shards back out, retracing the stages in
       // reverse so payload sizes mirror the way down
       let shard = full;
-      for (const ch of [...order].reverse()) {
-        t += agTime(shard, ch);
-        shard *= ch.n;
+      for (let i = order.length - 1; i >= 0; i--) {
+        t += agTime(shard, order[i]);
+        shard *= order[i].n;
       }
     }
   } else {
@@ -187,9 +187,128 @@ function channelOrders(chans: CommChannel[]): CommChannel[][] {
   return out;
 }
 
-// cache of collective costs, keyed by the collective kind, the number of
-// bytes in the payload, and the group structure (concatenated dim descriptions)
-const costCache = new Map<string, number>();
+// The payload-independent part of pricing one collective: its mesh dims
+// and every realization worth comparing. Built once per (dims, kind,
+// group) and kept as long as the mesh's dims array lives, so a search
+// that discards a mesh discards its entries with it.
+interface CollectivePlan {
+  group: MeshDim[];
+  // what the input must carry over the group (absent for p2p)
+  carried: 'unreduced' | 'sharded' | null;
+  price: (bytes: number) => number;
+}
+
+interface DimsPlans {
+  byKey: Map<string, CollectivePlan>;
+  // the reshard planner and the lowered ops price the same `over` arrays
+  // again and again, so each array also finds its plans by identity
+  byOver: WeakMap<MeshAxis[], Partial<Record<CollectiveKind, CollectivePlan>>>;
+}
+const plansByDims = new WeakMap<MeshDim[], DimsPlans>();
+
+function collectivePlan(kind: CollectiveKind, over: MeshAxis[], dims: MeshDim[]): CollectivePlan {
+  let plans = plansByDims.get(dims);
+  if (!plans) plansByDims.set(dims, (plans = { byKey: new Map(), byOver: new WeakMap() }));
+  let byKind = plans.byOver.get(over);
+  if (!byKind) plans.byOver.set(over, (byKind = {}));
+  return (byKind[kind] ??= lookupPlan(kind, over, dims, plans.byKey));
+}
+
+function lookupPlan(
+  kind: CollectiveKind,
+  over: MeshAxis[],
+  dims: MeshDim[],
+  byKey: Map<string, CollectivePlan>,
+): CollectivePlan {
+  const key = `${kind} ${over.join(' ')}`;
+  const hit = byKey.get(key);
+  if (hit) return hit;
+
+  const group = over
+    .map((name) => {
+      const dim = dims.find((d) => d.name === name);
+      if (!dim) throw new Error(`collective over unknown mesh dim`);
+      return dim;
+    })
+    // size-1 dims carry no traffic and would inflate the grid's ingress
+    .filter((d) => d.size > 1);
+  const carried: CollectivePlan['carried'] =
+    kind === 'p2p'
+      ? null
+      : kind === 'all-reduce' || kind === 'reduce-scatter'
+        ? 'unreduced'
+        : 'sharded';
+  const plan: CollectivePlan = { group, carried, price: collectivePricer(kind, group) };
+  byKey.set(key, plan);
+  return plan;
+}
+
+// The time of one collective over `group` as a function of the bytes
+// one chip holds: the cheapest of every legal realization.
+function collectivePricer(kind: CollectiveKind, group: MeshDim[]): (bytes: number) => number {
+  const composed = composeFactors(group);
+
+  // p2p is one neighbor hop, bounded by the slowest fabric it crosses.
+  // It reads the composed group: consecutive stages along chained
+  // factors of one parent are plain neighbors on that ring, so the
+  // stride derate (which models sibling groups sharing links) does not
+  // apply to the hop, and one message pays the slowest tier's latency
+  // once rather than every dim's
+  if (kind === 'p2p') {
+    if (!composed.length) return () => 0;
+    const bw = Math.min(...composed.map((d) => channelOf(d).bw));
+    const lat = Math.max(...composed.map((d) => d.axis.latency));
+    return (bytes) => bytes / bw + lat;
+  }
+
+  // price the group both as written and with chainable factors merged
+  const groups = composed.length < group.length ? [group, composed] : [group];
+
+  const pricers = groups.map((grp) => {
+    // every distinct stage ordering (payload growth makes order matter once
+    // the channels' bandwidths differ); a2a stages all carry the full
+    // payload, so its sum is order-blind and one ordering suffices
+    const chans = grp.map(channelOf);
+    const orders = kind === 'all-to-all' ? [chans] : channelOrders(chans);
+    // plus all axes working at once, which staging cannot express
+    const grid = gridChannel(grp);
+    const gridOrder = grid ? [grid] : [];
+    // the cheapest candidate, a running min in the order a list of them
+    // would have been built
+    return (bytes: number): number => {
+      let min = Infinity;
+      for (const order of orders) min = Math.min(min, stagedTime(kind, order, bytes));
+      if (grid) {
+        let slowest = -Infinity;
+        if (kind === 'all-to-all') {
+          // restricted to any one dim, the traffic is a full-payload a2a
+          // over that ring no matter how routing is staged, so each dim's
+          // link load is fixed and pipelining chunks through the dims
+          // finishes at the slowest dim rather than the staged sum
+          for (const ch of chans) slowest = Math.max(slowest, a2aTime(bytes, ch));
+          min = Math.min(min, slowest);
+        } else {
+          // the summed-ingress claim cannot beat any single dim's cut:
+          // data from a different slice of a dim must cross that dim's
+          // links somewhere (once per neighboring slice, replicating
+          // after), so each dim floors the grid at its own ring time for
+          // the final shard
+          const shard = kind === 'all-gather' ? bytes : bytes / grid.n;
+          const both = kind === 'all-reduce' ? 2 : 1;
+          for (const ch of chans) slowest = Math.max(slowest, both * agTime(shard, ch));
+          min = Math.min(min, Math.max(stagedTime(kind, gridOrder, bytes), slowest));
+        }
+      }
+      return min;
+    };
+  });
+
+  return (bytes) => {
+    let min = Infinity;
+    for (const p of pricers) min = Math.min(min, p(bytes));
+    return min;
+  };
+}
 
 // Time for one collective over the named mesh dims. input is the op's
 // INPUT tensor type (sharded over the dims for all-gather/all-to-all,
@@ -202,100 +321,19 @@ export function collectiveCost(
   bytesPerElem: number,
   dims: MeshDim[],
 ): number {
-  const group = over
-    .map((name) => {
-      const dim = dims.find((d) => d.name === name);
-      if (!dim) throw new Error(`collective over unknown mesh dim`);
-      return dim;
-    })
-    // size-1 dims carry no traffic and would inflate the grid's ingress
-    .filter((d) => d.size > 1);
+  const { group, carried, price } = collectivePlan(kind, over, dims);
 
   // gathered/routed dims must shard the input, reduced dims must be
   // unreduced partials on it (p2p sends the whole tensor and is exempt)
-  if (kind !== 'p2p') {
-    const carried =
-      kind === 'all-reduce' || kind === 'reduce-scatter' ? input.unreduced : input.sharding.flat();
+  if (carried)
     for (const d of group)
-      if (!carried.includes(d.name)) throw new Error(`collective dims absent from its input`);
-  }
+      if (
+        carried === 'unreduced'
+          ? !input.unreduced.includes(d.name)
+          : !input.sharding.some((axes) => axes.includes(d.name))
+      )
+        throw new Error(`collective dims absent from its input`);
 
   // what one chip actually holds, all sharding divided out
-  const bytes = localElems(input, dims) * bytesPerElem;
-
-  // pure in (kind, payload, group structure) and re-priced thousands of
-  // times across placements, so memoize on exactly those inputs. The
-  // parent axis name is part of the structure: co-parent factors compose,
-  // same-shaped factors of different parents do not
-  const ckey = `${kind} ${bytes}|` + group.map(descOf).sort().join('|');
-  const memo = costCache.get(ckey);
-  if (memo !== undefined) return memo;
-  const price = (t: number) => (costCache.set(ckey, t), t);
-
-  const composed = composeFactors(group);
-
-  // p2p is one neighbor hop, bounded by the slowest fabric it crosses.
-  // It reads the composed group: consecutive stages along chained
-  // factors of one parent are plain neighbors on that ring, so the
-  // stride derate (which models sibling groups sharing links) does not
-  // apply to the hop, and one message pays the slowest tier's latency
-  // once rather than every dim's
-  if (kind === 'p2p')
-    return price(
-      composed.length
-        ? bytes / Math.min(...composed.map((d) => channelOf(d).bw)) +
-            Math.max(...composed.map((d) => d.axis.latency))
-        : 0,
-    );
-
-  // price the group both as written and with chainable factors merged
-  const groups = composed.length < group.length ? [group, composed] : [group];
-
-  const candidates = groups.flatMap((grp) => {
-    // every distinct stage ordering (payload growth makes order matter once
-    // the channels' bandwidths differ); a2a stages all carry the full
-    // payload, so its sum is order-blind and one ordering suffices
-    const chans = grp.map(channelOf);
-    const orders = kind === 'all-to-all' ? [chans] : channelOrders(chans);
-    const cands = orders.map((order) => stagedTime(kind, order, bytes));
-
-    // plus all axes working at once, which staging cannot express
-    const grid = gridChannel(grp);
-    if (grid) {
-      if (kind === 'all-to-all') {
-        // restricted to any one dim, the traffic is a full-payload a2a
-        // over that ring no matter how routing is staged, so each dim's
-        // link load is fixed and pipelining chunks through the dims
-        // finishes at the slowest dim rather than the staged sum
-        cands.push(Math.max(...grp.map((d) => a2aTime(bytes, channelOf(d)))));
-      } else {
-        // the summed-ingress claim cannot beat any single dim's cut:
-        // data from a different slice of a dim must cross that dim's
-        // links somewhere (once per neighboring slice, replicating
-        // after), so each dim floors the grid at its own ring time for
-        // the final shard
-        const shard = kind === 'all-gather' ? bytes : bytes / grid.n;
-        const both = kind === 'all-reduce' ? 2 : 1;
-        const floor = Math.max(...grp.map((d) => both * agTime(shard, channelOf(d))));
-        cands.push(Math.max(stagedTime(kind, [grid], bytes), floor));
-      }
-    }
-
-    return cands;
-  });
-
-  return price(Math.min(...candidates));
-}
-
-// key fragment per dim, built once: dim objects are shared across every price of their mesh
-const dimDesc = new WeakMap<MeshDim, string>();
-
-function descOf(d: MeshDim): string {
-  let s = dimDesc.get(d);
-  if (s === undefined)
-    dimDesc.set(
-      d,
-      (s = `${d.axis.name} ${d.axis.kind} ${d.axis.bandwidth} ${d.axis.latency} ${d.axis.wrap} ${d.axis.size} ${d.stride} ${d.size}`),
-    );
-  return s;
+  return price(localElems(input, dims) * bytesPerElem);
 }
